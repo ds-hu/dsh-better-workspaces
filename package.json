@@ -14,12 +14,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cup113/dsh-better-workspaces.git"
+    "url": "git+https://github.com/ds-hu/dsh-better-workspaces.git"
   },
   "bugs": {
-    "url": "https://github.com/cup113/dsh-better-workspaces/issues"
+    "url": "https://github.com/ds-hu/dsh-better-workspaces/issues"
   },
-  "homepage": "https://github.com/cup113/dsh-better-workspaces#readme",
+  "homepage": "https://github.com/ds-hu/dsh-better-workspaces#readme",
   "keywords": [
     "deepseek-harness",
     "dsh",

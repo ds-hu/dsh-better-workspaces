@@ -168,7 +168,7 @@ absent.
 **One command installs and mounts the plugin** (plain JS, no build step):
 
 ```bash
-dsh plugin --profile web add github:cup113/dsh-better-workspaces
+dsh plugin --profile web add github:ds-hu/dsh-better-workspaces
 ```
 
 Then restart `dsh --profile web` once. There is no second step: this package is
@@ -238,7 +238,7 @@ curl -s http://127.0.0.1:3099/better-workspaces/api/worktree-workspaces
 ```
 
 `link:` points at the snapshot, so the plugin is installed from a clean
-checkout — what a user gets from `github:cup113/dsh-better-workspaces` — and
+checkout — what a user gets from `github:ds-hu/dsh-better-workspaces` — and
 your working tree stays untouched. Then remove the probe worktree
 (`git worktree remove "$snap"`).
 
