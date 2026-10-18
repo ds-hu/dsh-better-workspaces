@@ -1,6 +1,6 @@
 {
   "name": "dsh-better-workspaces",
-  "description": "Git workspace enhancements for the DeepSeek Harness Web GUI: worktree staging in the hero row, per-session git badges in the sidebar, a diff page in the official right sidebar, paseo-style pull/push/PR actions",
+  "description": "Worktrees, diffs, pull requests, and issue references inside the DeepSeek Harness Web GUI",
   "version": "0.2.7",
   "type": "module",
   "main": "lib/index.js",
@@ -49,6 +49,7 @@
     "cordis.patch.yml",
     "lib",
     "README.md",
+    "README.*.md",
     "CONTEXT.md",
     "docs",
     "LICENSE",

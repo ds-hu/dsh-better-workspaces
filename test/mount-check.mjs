@@ -288,8 +288,14 @@ assert.equal(rows[0].id, plugin.name, 'the row id must match the name the host h
 const readme = readFileSync(new URL('README.md', packageRoot), 'utf8');
 assert.match(
   readme,
+  /docs\/TECHNICAL\.md/,
+  'README must link to the technical documentation',
+);
+const technical = readFileSync(new URL('docs/TECHNICAL.md', packageRoot), 'utf8');
+assert.match(
+  technical,
   /duplicate loader entry id/,
-  'README must document the pre-bundle upgrade cleanup and its duplicate-id symptom',
+  'TECHNICAL.md must document the pre-bundle upgrade cleanup and its duplicate-id symptom',
 );
 
 for (const withWebServer of [false, true]) {
