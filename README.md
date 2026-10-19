@@ -2,60 +2,95 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Français](README.fr.md) · [한국어](README.ko.md)
 
-Worktrees, diffs, pull requests, and issue references inside the DeepSeek Harness Web GUI. Keep one conversation focused on one change, from the first message to the commit, without switching tabs.
+Git worktrees, full diff inspection, pull requests, and issue references inside the DeepSeek Harness Web GUI. Give each task its own isolated branch and directory—navigate, review, and ship without switching tabs or opening a terminal.
+
+---
+
+## Features
+
+### 1. Workspace mode right in the composer
+
+Toggle between `Local` and `New worktree` directly above the prompt box. Keep simple edits in `Local`; switch to `New worktree` whenever a task needs its own branch and isolated directory, preventing parallel tasks from colliding.
 
 ![Worktree mode in the composer](docs/screenshots/01-worktree-mode.png)
 
-**1 · Choose where the work happens.** The composer has a `Local` / `New worktree` switch. Keep `Local` for a quick fix; pick `New worktree` when the task deserves its own branch and directory.
+### 2. Fast branch setup from branches or PRs
+
+Enter a branch name or click the dice to generate one. Base your worktree on any local branch, remote branch, or open pull request. Clicking **Create** spins up an isolated workspace with a ready session immediately.
 
 ![Worktree form with branch name, base picker, and Create button](docs/screenshots/02-worktree-form.png)
 
-**2 · Name it, choose a base, create.** Type a branch name or roll the dice. The base can be a local branch, an origin branch, or a pull request. Create opens the worktree as its own workspace with a ready session.
+### 3. Session status and diff size at a glance
+
+Every session card in the sidebar displays its active branch and diff volume (`+11 −3`). When a pull request is open or CI checks are running, their status joins the same row—no need to run `git status` in the terminal.
 
 ![Session row showing branch and diff size](docs/screenshots/03-sidebar-badges.png)
 
-**3 · See each session's state at a glance.** Branch and change size sit under the session title. When the branch has a PR and checks, those join the same row.
+### 4. Full-page diff review in the sidebar
+
+Click the `±` badge to open the diff drawer. Switch smoothly across uncommitted changes, current session changes, task scope, or base branch comparisons. Expand hunks line-by-line, edit files in place, and inspect recent commits.
 
 ![Diff page with scopes, file list, hunks, and actions](docs/screenshots/04-diff-view.png)
 
-**4 · Review the whole change on one page.** The `±` pill opens a diff page in the right sidebar. Switch between uncommitted changes, this session, the task, and a base comparison. Expand a file for line-by-line hunks, edit it in place, or check the commit list.
+### 5. Git actions without leaving the page
+
+Run essential git actions straight from the diff view: Commit, Pull, Push, open a PR, merge, update from base, or discard changes. Inapplicable actions clearly explain prerequisite states.
 
 ![Commit button and More menu with pull, push, PR, merge, update, and discard](docs/screenshots/05-diff-actions.png)
 
-**5 · Ship without leaving the page.** Commit, pull, push, create a PR, merge, update from the base, or discard changes. Unavailable actions explain what is missing.
+### 6. Attach GitHub PRs and issues to prompts
+
+The GitHub button beside the composer lists open pull requests and issues from your repository. Select any item to attach it directly to your prompt.
 
 ![GitHub picker listing open pull requests and issues](docs/screenshots/06-github-picker.png)
 
-**6 · Bring a PR or issue into the prompt.** The GitHub button beside the composer lists open pull requests and issues from the current repository. Pick one to attach a reference.
+### 7. Compact composer chips, complete model context
+
+Prompts stay clean with a compact reference chip in the input box. On send, it automatically expands into the full title, issue/PR body, branch details, and URL so the agent receives exact context.
 
 ![Composer with a compact issue reference chip and send button](docs/screenshots/07-reference-chip.png)
 
-**7 · Keep the draft compact.** The composer holds one small chip. On send, it expands into the full title, link, base/head, and body, so the model receives exact context.
+---
 
-## Install
+## Quick Workflow
+
+1. **Start a session:** Open any git workspace in DeepSeek Harness.
+2. **Choose your scope:** Select `Local` for quick in-place edits or `New worktree` for an isolated branch.
+3. **Develop & review:** Use the GitHub picker to reference issues, check progress via sidebar badges, and click `±` to review line-by-line diffs.
+4. **Ship:** Commit, push, or open a pull request directly from the diff view.
+
+---
+
+## Installation
 
 ```bash
 dsh plugin --profile web add github:ds-hu/dsh-better-workspaces
 ```
 
-Restart `dsh --profile web` once. Requires dsh ≥ 0.2.0, Node.js ≥ 20.19, `pnpm` on `PATH`, and git. The PR and issue features also use an authenticated `gh`; everything else works without it.
+Restart `dsh --profile web` once to activate.
 
-## Use it
+### Requirements
+- **DeepSeek Harness:** ≥ 0.2.0
+- **Node.js:** ≥ 20.19
+- **Tools:** `git`, `pnpm` (available on `PATH`)
+- **GitHub CLI (optional):** Authenticated `gh` enables PR and issue picker features. Worktrees, sidebar badges, and diff review work fully without it.
 
-1. Open a git workspace and start a session.
-2. Choose `Local` or `New worktree` in the composer.
-3. Use `±` to review, `Commit` / `More` to ship, and the GitHub button to attach a PR or issue.
+---
 
 ## Notes
 
-- Runs on Linux, macOS 13+, and Windows 10+.
-- `gh` is optional. Without it, worktrees, badges, and the diff page still work.
-- Every action stays in the current browser tab.
+- Compatible with Linux, macOS 13+, and Windows 10+.
+- All operations run within the current browser tab.
+
+---
 
 ## Documentation
 
-Architecture, design records, security, development, and operations are in [docs/TECHNICAL.md](docs/TECHNICAL.md). The decisions behind the plugin are in [docs/adr/](docs/adr/).
+- [docs/TECHNICAL.md](docs/TECHNICAL.md) — Architecture, design records, security model, upgrade notes, and manual operations.
+- [docs/adr/](docs/adr/) — Architecture Decision Records detailing core design choices.
+
+---
 
 ## License
 
-MIT. Third-party notices ship in [NOTICE](NOTICE) and [LICENSES/](LICENSES/).
+[MIT](LICENSE). Third-party notices and licenses are documented in [NOTICE](NOTICE) and [LICENSES/](LICENSES/).
