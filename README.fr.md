@@ -63,11 +63,20 @@ Le composeur reste dégagé grâce à une puce discrète qui n'encombre pas l'es
 
 ## Installation
 
+Installez depuis npm avec une seule commande :
+
 ```bash
-dsh plugin --profile web add github:ds-hu/dsh-better-workspaces
+dsh plugin --profile web add @ds-hu/dsh-better-workspaces
 ```
 
 Redémarrez `dsh --profile web` une fois pour finaliser l'activation.
+
+Vous pouvez aussi installer le plugin depuis l'interface Web de DSH :
+
+1. Ouvrez **Plugins** dans la barre latérale.
+2. Cliquez sur **Add plugin**.
+3. Saisissez `@ds-hu/dsh-better-workspaces` et choisissez **Official npm registry** comme source.
+4. Cliquez sur **Install**, puis sur **Enable now** une fois l'installation terminée. Si un redémarrage est demandé, relancez `dsh --profile web`.
 
 ### Prérequis
 - **DeepSeek Harness :** ≥ 0.2.0

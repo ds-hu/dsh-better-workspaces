@@ -63,11 +63,20 @@
 
 ## 安装
 
+通过 npm 一行命令安装：
+
 ```bash
-dsh plugin --profile web add github:ds-hu/dsh-better-workspaces
+dsh plugin --profile web add @ds-hu/dsh-better-workspaces
 ```
 
 安装后重启一次 `dsh --profile web` 即可生效。
+
+也可以直接在 DSH Web 界面中安装：
+
+1. 打开侧栏的 **插件** 页面。
+2. 点击 **添加插件**。
+3. 输入 `@ds-hu/dsh-better-workspaces`，安装源选择 **npm 官方源**。
+4. 点击 **安装**；安装完成后点击 **立即启用**。如界面提示需要重启，请重启一次 `dsh --profile web`。
 
 ### 环境要求
 - **DeepSeek Harness:** ≥ 0.2.0

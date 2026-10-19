@@ -63,11 +63,20 @@ DeepSeek Harness Web GUI に Git worktree、差分ビューア、Pull Request �
 
 ## インストール
 
+npm から 1 行のコマンドでインストールできます。
+
 ```bash
-dsh plugin --profile web add github:ds-hu/dsh-better-workspaces
+dsh plugin --profile web add @ds-hu/dsh-better-workspaces
 ```
 
 インストール後、`dsh --profile web` を一度再起動してください。
+
+DSH の Web UI からインストールすることもできます。
+
+1. サイドバーの **Plugins** を開きます。
+2. **Add plugin** をクリックします。
+3. `@ds-hu/dsh-better-workspaces` を入力し、インストール元として **Official npm registry** を選択します。
+4. **Install** をクリックし、完了後に **Enable now** をクリックします。再起動を求められた場合は、`dsh --profile web` を一度再起動してください。
 
 ### 動作環境
 - **DeepSeek Harness:** ≥ 0.2.0

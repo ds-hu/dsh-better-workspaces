@@ -1,6 +1,6 @@
 # Technical documentation
 
-Architecture, installation details, release verification, development, operations, and attribution for `dsh-better-workspaces`. For the product overview and screenshots, see [README](../README.md).
+Architecture, installation details, release verification, development, operations, and attribution for `@ds-hu/dsh-better-workspaces`. For the product overview and screenshots, see [README](../README.md).
 
 ## Architecture
 
@@ -16,7 +16,7 @@ Prerequisites: `dsh` ≥ 0.2.0 with the `web` profile, Node.js ≥ 20.19, `pnpm`
 **One command installs and mounts the plugin** (plain JS, no build step):
 
 ```bash
-dsh plugin --profile web add github:ds-hu/dsh-better-workspaces
+dsh plugin --profile web add @ds-hu/dsh-better-workspaces
 ```
 
 Then restart `dsh --profile web` once. There is no second step: this package is a **bundle** (it declares `dsh.bundle.patch` next to `dsh.client`), so the dsh CLI's reconcile step appends it to the profile's `dsh.profile.bundles` automatically, and its own `cordis.patch.yml` becomes a patch layer that carries the plugin row. **Do not hand-edit the profile's `cordis.patch.yml`** — the package already ships that row.
@@ -25,10 +25,10 @@ Self-check:
 
 ```bash
 # the composed tree shows the package's own layer and exactly one row
-dsh --profile web --dump-config | grep -A 1 '== dsh-better-workspaces'
-#   # == dsh-better-workspaces
+dsh --profile web --dump-config | grep -A 1 '== @ds-hu/dsh-better-workspaces'
+#   # == @ds-hu/dsh-better-workspaces
 #   - id: better-workspaces
-#     name: dsh-better-workspaces
+#     name: '@ds-hu/dsh-better-workspaces'
 
 curl -s http://127.0.0.1:3080/better-workspaces/api/worktree-workspaces
 #   expected {"ok":true,...}; 404 means the row did not activate
@@ -37,7 +37,7 @@ curl -s http://127.0.0.1:3080/better-workspaces/api/worktree-workspaces
 Uninstall is symmetric — reconcile also drops the bundle from `dsh.profile.bundles`:
 
 ```bash
-dsh plugin --profile web remove dsh-better-workspaces
+dsh plugin --profile web remove @ds-hu/dsh-better-workspaces
 ```
 
 ## Verifying a release against a live dsh (required before publishing)
@@ -59,7 +59,7 @@ printf 'packages:\n  - .\n' > "$scratch/profiles/web/pnpm-workspace.yaml"
 
 # 1. the CLI reconciles the bundle and the loader composes exactly one row
 DSH_HOME="$scratch" dsh plugin --profile web add "link:$snap"
-DSH_HOME="$scratch" dsh --profile web --dump-config | grep -A 1 '== dsh-better-workspaces'
+DSH_HOME="$scratch" dsh --profile web --dump-config | grep -A 1 '== @ds-hu/dsh-better-workspaces'
 
 # 2. boot it and prove BOTH halves are live (host route + browser bundle)
 DSH_HOME="$scratch" dsh --profile web --no-open --port 3099 &
@@ -69,14 +69,14 @@ curl -s http://127.0.0.1:3099/better-workspaces/api/worktree-workspaces
 # served (both must be 200 — 200 + 404 means the host half mounted while the
 # browser half did not build):
 #   grep -o 'better-workspaces/client.js' <index.html>
-#   curl -b <cookie> 'http://127.0.0.1:3099/plugins/??...,dsh-better-workspaces/client.js,...'
+#   curl -b <cookie> 'http://127.0.0.1:3099/plugins/??...,@ds-hu/dsh-better-workspaces/client.js,...'
 ```
 
-`link:` points at the snapshot, so the plugin is installed from a clean checkout — what a user gets from `github:ds-hu/dsh-better-workspaces` — and your working tree stays untouched. Then remove the probe worktree (`git worktree remove "$snap"`).
+`link:` points at the snapshot, so the plugin is installed from a clean checkout — what a user gets from `@ds-hu/dsh-better-workspaces` — and your working tree stays untouched. Then remove the probe worktree (`git worktree remove "$snap"`).
 
 **Two footguns in that recipe, both learned the hard way.**
 
-`link:` is for probing only. The profile's correctness then depends on a directory that lives outside it, so **the moment the snapshot is deleted the plugin's manifest becomes unreadable** and the Plugins page renders `包元信息错误: Plugin metadata for dsh-better-workspaces: … ENOENT: no such file or directory, open '/…/package.json'` — the plugin itself keeps running, only its display metadata breaks. Always replace the probe with the published spec (same command without the `link:`) before walking away, and only then remove the snapshot.
+`link:` is for probing only. The profile's correctness then depends on a directory that lives outside it, so **the moment the snapshot is deleted the plugin's manifest becomes unreadable** and the Plugins page renders `包元信息错误: Plugin metadata for @ds-hu/dsh-better-workspaces: … ENOENT: no such file or directory, open '/…/package.json'` — the plugin itself keeps running, only its display metadata breaks. Always replace the probe with the published spec (same command without the `link:`) before walking away, and only then remove the snapshot.
 
 The **rendered UI must be looked at**, because DOM-injection degradation is silent by design (ADR 0001). The offline suites build their own DOM and therefore cannot see the slot framework's wrappers — a slot's `parentElement` is the renderer's `display: contents` anchor, *not* the layout row containing it (ADR 0001 Amendment 2).
 
@@ -173,7 +173,7 @@ npm run check
 
 Three checks after a restart:
 
-1. `dsh --profile web --dump-config | grep -A 1 '== dsh-better-workspaces'` — the package layer appears and `id: better-workspaces` appears **exactly once** (more than once means a hand-written row is still in the profile layer; delete it).
+1. `dsh --profile web --dump-config | grep -A 1 '== @ds-hu/dsh-better-workspaces'` — the package layer appears and `id: better-workspaces` appears **exactly once** (more than once means a hand-written row is still in the profile layer; delete it).
 2. `curl -s http://127.0.0.1:3080/better-workspaces/api/worktree-workspaces` — expect `{"ok":true,...}`. A 404 means the row did not activate: confirm the `link:` dependency exists in the profile's `node_modules` and that `lib/index.js` still injects both `webServer` and `workspaceRegistry`.
 3. Refresh the GUI: a non-worktree workspace shows the `Local` hero control; a worktree workspace hides it and shows a branch icon on the workspace row.
 

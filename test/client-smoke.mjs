@@ -38,11 +38,12 @@ globalThis.__ModuleLoader__ = {
   },
 };
 
+const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
 (0, eval)(source);
 
 assert.ok(loadedEntry, 'bundle called __ModuleLoader__.load');
-assert.equal(loadedEntry.id, 'dsh-better-workspaces');
+assert.equal(loadedEntry.id, manifest.name);
 assert.equal(typeof loadedEntry.factory, 'function');
 
 const mod = loadedEntry.factory(factoryRequire);

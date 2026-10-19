@@ -277,9 +277,9 @@ assert.match(patchSource, /^\s*-\s*insert:/m, `${declaredPatch} must contribute 
  * already carries: the include inserts verbatim and the Loader throws on a
  * repeated entry id, so "bundle layer + hand-written row" is a boot failure
  * rather than a harmless duplicate. */
-const rows = [...patchSource.matchAll(/^\s*-\s*id:\s*(\S+)\s*\n\s*name:\s*(\S+)\s*$/gm)].map((match) => ({
+const rows = [...patchSource.matchAll(/^\s*-\s*id:\s*(\S+)\s*\n\s*name:\s*(?:'([^']+)'|"([^"]+)"|(\S+))\s*$/gm)].map((match) => ({
   id: match[1],
-  name: match[2],
+  name: match[2] ?? match[3] ?? match[4],
 }));
 assert.equal(rows.length, 1, `${declaredPatch} must contribute exactly one row, found ${rows.length}`);
 assert.equal(rows[0].name, manifest.name, 'the row must mount this package by name');

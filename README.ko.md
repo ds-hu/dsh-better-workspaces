@@ -63,11 +63,20 @@ diff 패널에서 Commit, Pull, Push, PR 생성, 병합, 베이스 업데이트,
 
 ## 설치
 
+npm에서 한 줄 명령으로 설치할 수 있습니다.
+
 ```bash
-dsh plugin --profile web add github:ds-hu/dsh-better-workspaces
+dsh plugin --profile web add @ds-hu/dsh-better-workspaces
 ```
 
 설치 후 `dsh --profile web`을 한 번 재시작하면 활성화됩니다.
+
+DSH 웹 UI에서도 설치할 수 있습니다.
+
+1. 사이드바에서 **Plugins**를 엽니다.
+2. **Add plugin**을 클릭합니다.
+3. `@ds-hu/dsh-better-workspaces`를 입력하고 설치 소스로 **Official npm registry**를 선택합니다.
+4. **Install**을 클릭한 뒤 설치가 끝나면 **Enable now**를 클릭합니다. 재시작하라는 안내가 나오면 `dsh --profile web`을 한 번 재시작합니다.
 
 ### 요구 사항
 - **DeepSeek Harness:** ≥ 0.2.0

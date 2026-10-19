@@ -1,8 +1,11 @@
 {
-  "name": "dsh-better-workspaces",
+  "name": "@ds-hu/dsh-better-workspaces",
   "description": "Worktrees, diffs, pull requests, and issue references inside the DeepSeek Harness Web GUI",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",

@@ -63,11 +63,20 @@ Prompts stay clean with a compact reference chip in the input box. On send, it a
 
 ## Installation
 
+Install from npm with one command:
+
 ```bash
-dsh plugin --profile web add github:ds-hu/dsh-better-workspaces
+dsh plugin --profile web add @ds-hu/dsh-better-workspaces
 ```
 
 Restart `dsh --profile web` once to activate.
+
+Or install from the DSH Web GUI:
+
+1. Open **Plugins** in the sidebar.
+2. Click **Add plugin**.
+3. Enter `@ds-hu/dsh-better-workspaces` and choose **Official npm registry** as the source.
+4. Click **Install**, then **Enable now** when the installation finishes. If a restart is requested, restart `dsh --profile web`.
 
 ### Requirements
 - **DeepSeek Harness:** ≥ 0.2.0

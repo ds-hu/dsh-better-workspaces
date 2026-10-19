@@ -958,6 +958,8 @@ for (const cell of [timeCell, pinCell, actionCell]) {
 
 const pluginStyle = document.querySelector('style[data-plugin-css="dsh-better-workspaces/client.css"]');
 assert.ok(pluginStyle, 'the plugin stylesheet is mounted');
+assert.equal(pluginStyle.dataset.plugin, '@ds-hu/dsh-better-workspaces',
+  'the stylesheet carries the scoped module id DSH uses to evict this bundle\'s styles');
 const badgesRule = /\.dsh-bw-badges\s*\{([^{}]*)\}/.exec(pluginStyle.textContent);
 assert.ok(badgesRule, 'the badge row rule is present');
 assert.ok(/(^|[;\s])order:\s*1\b/.test(badgesRule[1]),
