@@ -34,13 +34,12 @@ function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-const emptyGitTemplate = join(sandbox, 'empty-git-template');
-mkdirSync(emptyGitTemplate, { recursive: true });
-
 function initRepo(path) {
   mkdirSync(path, { recursive: true });
-  // empty template: skip copying git's sample hooks into a throwaway fixture
-  git(path, 'init', '-b', 'main', `--template=${emptyGitTemplate}`);
+  // Plain init: this suite builds a handful of repositories, so the sample
+  // hooks cost nothing measurable, and its fixtures are security probes that
+  // should not depend on a trimmed template.
+  git(path, 'init', '-b', 'main');
   git(path, 'config', 'user.email', 'security@example.com');
   git(path, 'config', 'user.name', 'Security Test');
   writeFileSync(join(path, 'tracked.txt'), 'one\n');

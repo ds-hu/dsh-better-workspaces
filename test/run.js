@@ -36,9 +36,13 @@ function git(cwd, ...args) {
 // `git init` copies git's sample hooks into every fixture repo: 27 files per
 // throwaway repository, all of them freshly written and scanned. An empty
 // template cuts that to 9 and saved ~150 ms per repo on Windows. No fixture
-// relies on the samples — the ones that exercise hooks write their own.
+// relies on the sample files — the ones that exercise hooks write their own —
+// but Git only *creates* `hooks/` and `info/` by copying them from the
+// template (empty directories are copied through), and two fixtures write into
+// those directories, so both stay.
 const emptyGitTemplate = join(scratch, 'empty-git-template');
-mkdirSync(emptyGitTemplate, { recursive: true });
+mkdirSync(join(emptyGitTemplate, 'hooks'), { recursive: true });
+mkdirSync(join(emptyGitTemplate, 'info'), { recursive: true });
 function gitInit(cwd, ...args) {
   // The option goes first: one fixture passes a positional directory
   // (`git init --separate-git-dir <dir> <work>`), and Git stops parsing options
