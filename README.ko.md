@@ -4,6 +4,8 @@
 
 DeepSeek Harness 웹 GUI에서 Git worktree, diff 상세 검토, Pull Request 및 Issue 참조를 바로 다룹니다. 작업마다 독립된 브랜치와 전용 디렉터리를 할당해, 첫 프롬프트 입력부터 커밋·푸시까지 브라우저 탭 하나로 끝냅니다.
 
+**플러그인 목록 이름:** 工作区增强 · Better Workspaces.
+
 ---
 
 ## 주요 기능

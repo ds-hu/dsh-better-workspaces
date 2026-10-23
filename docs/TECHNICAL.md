@@ -11,7 +11,7 @@ See [CONTEXT.md](../CONTEXT.md) for the glossary and [docs/adr/](adr/) for the d
 
 ## Install (web profile)
 
-Prerequisites: `dsh` ≥ 0.2.0 with the `web` profile, Node.js ≥ 20.19, `pnpm` on `PATH`, `git` ≥ 2.31, and a supported platform — Linux, Windows 10+/Server 2016+ (Git for Windows), or macOS 13+. Platform anchoring is layered (ADR 0013): **Linux** pins every repository mutation and file save to verified dirfds through `/proc` and commits saves with `renameat2(RENAME_EXCHANGE)` (GNU coreutils `mv --exchange`; a Linux system without it still fails closed with HTTP 503 rather than weakening the exchange guarantee); **Windows and macOS** run the paseo path model — canonical paths for Git discovery, stat dev/ino identity checks at every operation boundary plus re-authorization after mutations, and file saves through fsync + sha1 compare-and-swap + atomic rename (paseo's file-editor semantics; the displaced-inode exchange rollback is a Linux-only extra). `gh` (authenticated) is optional — it enables the PR/checks features and the composer's issue/PR picker and PR checkout, and degrades gracefully when absent.
+Prerequisites: `dsh` ≥ 0.2.0 with the `web` profile, Node.js ≥ 20.19, `pnpm` on `PATH`, `git` ≥ 2.31, and a supported platform — Linux, Windows 10+/Server 2016+ (Git for Windows), or macOS 13+. **0.2.1 is the tested target;** the package declares `engines.dsh` `>=0.2.0 <0.3.0`, so 0.2.0 keeps the pre-`workingDirectory` fallback while 0.2.1 adds the effective-directory and native-worktree paths described below. Platform anchoring is layered (ADR 0013): **Linux** pins every repository mutation and file save to verified dirfds through `/proc` and commits saves with `renameat2(RENAME_EXCHANGE)` (GNU coreutils `mv --exchange`; a Linux system without it still fails closed with HTTP 503 rather than weakening the exchange guarantee); **Windows and macOS** run the paseo path model — canonical paths for Git discovery, stat dev/ino identity checks at every operation boundary plus re-authorization after mutations, and file saves through fsync + sha1 compare-and-swap + atomic rename (paseo's file-editor semantics; the displaced-inode exchange rollback is a Linux-only extra). `gh` (authenticated) is optional — it enables the PR/checks features and the composer's issue/PR picker and PR checkout, and degrades gracefully when absent.
 
 **One command installs and mounts the plugin** (plain JS, no build step):
 
@@ -132,6 +132,29 @@ duplicate loader entry id: better-workspaces
 
 Delete the hand-written insert block (leave every other entry in that file, such as the `authorization` row, untouched) and the package's own layer takes over.
 
+### Upgrading from the unscoped package
+
+Releases up to 0.2.6 were published as `dsh-better-workspaces`; the current package is `@ds-hu/dsh-better-workspaces`. Both bundles insert a loader row with id `better-workspaces`, so installing the new one beside the old one makes the next boot fail with `duplicate loader entry id: better-workspaces`. Remove the old bundle first, then install the new one once:
+
+```bash
+dsh plugin --profile web remove dsh-better-workspaces
+dsh plugin --profile web add @ds-hu/dsh-better-workspaces
+# or, before the next npm release:
+dsh plugin --profile web add /path/to/ds-hu-dsh-better-workspaces-0.2.9.tgz
+```
+
+Restart `dsh --profile web` after the swap. The installed components change name and version, and the profile's bundle list is recomputed at boot; a page refresh alone does not re-read the host half.
+
+## DSH 0.2.1 compatibility
+
+DSH 0.2.1 changes the Session directory model and introduces native Git worktrees; this release (0.2.9) adapts to both without changing the managed-worktree lifecycle.
+
+- **Effective working directory.** 0.2.1 keeps the Session header's `cwd` as the immutable *original* project and records the directory a Session actually entered in the `workingDirectory` Session projection. The client reads that projection first (`effectiveSessionCwd`) and keeps the header as the 0.2.0 fallback, so sidebar badges, the hero control, the diff page, and forge references follow a Session that moved into a worktree.
+- **Native worktrees.** The optional official *Git Worktrees* bundle creates checkouts under `<repo>/.agents/worktrees/<name>` and changes the calling Session's working directory, but does not write this plugin's `dsh-worktree` metadata. The host authorizer accepts such a checkout only when it is a live `git worktree list` row of an **exact registered main checkout**; it is authorized as `kind: 'linked-worktree'`, so snapshots, diffs, commits, pushes, PRs, and merge actions work. Archive and cleanup still require `managed-worktree` metadata, so they never delete a native checkout. A subdirectory of a worktree, and a worktree of an unregistered checkout, remain unauthorized (ADR 0010).
+- **Compatibility declaration.** `package.json` declares `engines.dsh` (`>=0.2.0 <0.3.0`). 0.2.1's installation and profile preflight read that range before any DSH peer dependency.
+- **Inventory metadata.** `locale/en.json` and `locale/zh.json` provide the localized title and description (English *Better Workspaces* / 中文 *工作区增强*), and `icon.svg` is original artwork. All three are exported and included in `files`, so Plugin Manager and Settings can read them without activating the plugin.
+- **Coexistence.** Both worktree flows may be enabled at once. This plugin's archive and cleanup only ever touch its own managed worktrees; native checkouts stay owned by DSH and Git. Prefer one flow per task to avoid two checkouts of the same branch.
+
 ## Developing from a local checkout
 
 Use a `link:` spec; only the spec differs, the mount is the same:
@@ -161,7 +184,7 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs ESLint, scratch-repository Host tests, security and mutation suites, the fast client contract smoke test, a real React + JSDOM effect/focus/cleanup suite, mount checks, and an npm-pack allowlist test that requires NOTICE plus all third-party licenses. CI repeats the same gate on the latest Node 20 and Node 22 releases on Ubuntu.
+`npm run check` runs ESLint, scratch-repository Host tests, security and mutation suites, the fast client contract smoke test, a real React + JSDOM effect/focus/cleanup suite, mount checks, and an npm-pack allowlist test that requires NOTICE, both locale dictionaries, the icon, and all third-party licenses. CI repeats the same gate on the latest Node 20 and Node 22 releases on Ubuntu.
 
 ## Operations: cold start and restart self-check
 

@@ -4,6 +4,8 @@
 
 Worktrees Git, visualisation complète des diffs, pull requests et tickets d'issues directement dans l'interface web de DeepSeek Harness. Isolez chaque tâche dans sa propre branche et son propre répertoire : de la première invite au commit final, tout s'effectue sans quitter la page ni ouvrir de terminal.
 
+**Nom dans le catalogue des plugins :** Better Workspaces · 工作区增强.
+
 ---
 
 ## Fonctionnalités

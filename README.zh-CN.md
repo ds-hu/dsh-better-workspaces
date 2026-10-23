@@ -4,6 +4,8 @@
 
 在 DeepSeek Harness Web GUI 中原生集成 Git Worktree、文件差异对比、GitHub PR 与 Issue 联动。每个任务独享独立分支与隔离目录，从首条提示词到提交推送，全流程无需离开当前页面或切换终端。
 
+**插件目录中的名称：** 工作区增强 · Better Workspaces。
+
 ---
 
 ## 功能特性

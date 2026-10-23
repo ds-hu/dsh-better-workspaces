@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Better Workspaces">
+  <!-- Original artwork: a Git branch beside a compact diff, on a workspace tile. -->
+  <defs>
+    <linearGradient id="bw-tile" x1="4" y1="4" x2="60" y2="60" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1B1636"/>
+      <stop offset="0.55" stop-color="#2C2360"/>
+      <stop offset="1" stop-color="#5A3FE6"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="url(#bw-tile)"/>
+  <path d="M16 14V50" stroke="#9FB6FF" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M16 32C16 24 23 20 32 20H38" stroke="#6FE3D2" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+  <circle cx="16" cy="14" r="4.5" fill="#9FB6FF"/>
+  <circle cx="16" cy="50" r="4.5" fill="#9FB6FF"/>
+  <circle cx="16" cy="32" r="4.5" fill="#FFFFFF"/>
+  <circle cx="40" cy="20" r="4.5" fill="#6FE3D2"/>
+  <path d="M35 33H52" stroke="#7EF0B2" stroke-width="3" stroke-linecap="round"/>
+  <path d="M35 41H47" stroke="#C7D3FF" stroke-width="3" stroke-linecap="round"/>
+  <path d="M35 49H50" stroke="#FF8A8A" stroke-width="3" stroke-linecap="round"/>
+</svg>

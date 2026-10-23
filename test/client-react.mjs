@@ -153,6 +153,22 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
   assert.equal(heroCwdFor({}, undefined, items), null, 'no current Session resolves to nothing');
   assert.equal(heroCwdFor({}, 's1', null), null, 'an absent Workspace store resolves to nothing');
   assert.equal(heroCwdFor({ cwd: '' }, 's1', items), '/repo-w1', 'an empty cwd falls through to membership');
+  assert.equal(heroCwdFor({ cwd: '/repo-original', projectionValues: { workingDirectory: '/repo-worktree' } }, 's1', items),
+    '/repo-worktree', 'DSH 0.2.1 workingDirectory outranks the immutable header cwd');
+  assert.equal(heroCwdFor({ cwd: '/repo-original', projectionValues: { workingDirectory: null } }, 's1', items),
+    '/repo-original', 'a null workingDirectory projection falls back to the header');
+  assert.equal(heroCwdFor({ cwd: '/repo-original', projectionValues: { workingDirectory: '' } }, 's1', items),
+    '/repo-original', 'an empty workingDirectory projection falls back to the header');
+
+  // The projection is the effective directory; header cwd is the original
+  // project and must stay observable in diagnostics beside it.
+  const { effectiveSessionCwd } = mod.__bwTest;
+  assert.equal(effectiveSessionCwd({ cwd: '/original', projectionValues: { workingDirectory: '/entered' } }), '/entered');
+  assert.equal(effectiveSessionCwd({ cwd: '/original', projectionValues: {} }), '/original');
+  assert.equal(effectiveSessionCwd({ projectionValues: { workingDirectory: '/entered' } }), '/entered');
+  assert.equal(effectiveSessionCwd({ cwd: '/original' }), '/original');
+  assert.equal(effectiveSessionCwd({ cwd: '' }), null);
+  assert.equal(effectiveSessionCwd(undefined), null);
 
   // the Workspace row shapes that must be skipped, not crashed on
   const odd = [
@@ -175,6 +191,7 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
     [{}, 's1', { cwd: '/repo-w1', source: 'workspace' }, 'a workspace-derived cwd reports the workspace as the source'],
     [{}, 's9', { cwd: null, source: null }, 'an unresolved cwd names no source'],
     [{ cwd: '/elsewhere' }, 's1', { cwd: '/elsewhere', source: 'session' }, 'a bound session cwd outranks workspace membership'],
+    [{ cwd: '/original', projectionValues: { workingDirectory: '/entered' } }, 's1', { cwd: '/entered', source: 'session' }, 'the working-directory projection is the session source'],
   ];
   for (const [summary, id, expected, label] of resolveCases) {
     const actual = heroResolve(summary, id, items);
@@ -193,6 +210,20 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
   assert.equal(projected.phase, 'ready');
   assert.equal(projected.byId.s1.cwd, null,
     'a session without cwd projects an explicit null rather than dropping the field');
+  assert.equal(projected.byId.s1.headerCwd, null,
+    'a session without a header cwd projects an explicit null');
+  assert.equal(projected.byId.s1.workingDirectory, null,
+    'a session without a working-directory projection projects an explicit null');
+  const projectedMove = projectSessionSnapshot({
+    current: 's1',
+    ids: ['s1'],
+    phase: 'ready',
+    byId: { s1: { cwd: '/original', projectionValues: { workingDirectory: '/worktree' }, title: 'T' } },
+  });
+  assert.equal(projectedMove.byId.s1.cwd, '/worktree',
+    'the diagnostic cwd is the effective working directory');
+  assert.equal(projectedMove.byId.s1.headerCwd, '/original',
+    'the immutable header cwd stays visible beside the effective directory');
   assert.equal(projected.byId.s1.title, 'T');
   assert.equal(projectWorkspaceSnapshot(null), null, 'a missing Workspace snapshot projects to null');
   const oddWorkspace = projectWorkspaceSnapshot({ items: [{ workspaceId: 'w' }] }).items[0];

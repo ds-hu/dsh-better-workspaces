@@ -4,6 +4,8 @@
 
 Git worktrees, full diff inspection, pull requests, and issue references inside the DeepSeek Harness Web GUI. Give each task its own isolated branch and directory—navigate, review, and ship without switching tabs or opening a terminal.
 
+**Plugin inventory name:** Better Workspaces · 工作区增强.
+
 ---
 
 ## Features

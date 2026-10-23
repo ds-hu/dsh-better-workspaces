@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Better Workspaces",
+    "description": "Adds Git worktrees, diff review, commit/push/PR actions, and issue references to Workspaces, with branch and change badges in the sidebar."
+  }
+}

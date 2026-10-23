@@ -2808,6 +2808,27 @@ await test('cleanup sweep: dry-run, guards, archive + workspace delete', async (
   await archiveWorktree(wtDirty.path, { force: true });
   await patchMetadata(wtUnknown.path, (metadata) => ({ ...metadata, baseRef: unknownBase }));
   await archiveWorktree(wtUnknown.path, { force: true });
+
+  // DSH 0.2.1: the header stays at the original project while the Session
+  // works inside a managed worktree. The cleanup guard must follow the
+  // workingDirectory projection, not only the header. Run this after the other
+  // clean worktrees are archived so the projected one is the only candidate.
+  const wtProjected = await createWorktree({ repoRoot: repo, intent: 'branch-off', slug: 'session-projected-0004' });
+  wsEntities.push({ path: wtProjected.path, workspaceId: 'ws-session-projected-0004' });
+  const projectedGuard = await createCleanup({
+    get(name) {
+      if (name === 'sessions') return { list: () => [{ id: 'projected-host-session', header: { cwd: repo }, seq: 1 }] };
+      if (name === 'sessionProjections') {
+        return { snapshot: () => ({ values: { workingDirectory: wtProjected.path } }) };
+      }
+      if (name === 'workspaceRegistry') return registryMock;
+      return undefined;
+    },
+  })({});
+  assert.ok(projectedGuard.skipped.some((s) => s.path === wtProjected.path && s.reason === 'session'),
+    JSON.stringify(projectedGuard));
+  assert.ok(existsSync(wtProjected.path));
+  await archiveWorktree(wtProjected.path, { force: true });
 });
 
 await test('cleanup abandoned sweep: unreferenced+old only', async () => {

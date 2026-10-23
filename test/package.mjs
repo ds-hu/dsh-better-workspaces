@@ -7,7 +7,28 @@ const manifest = JSON.parse(await readFile(new URL('package.json', root), 'utf8'
 assert.equal(manifest.main, 'lib/index.js');
 assert.equal(manifest.exports?.['.'], './lib/index.js');
 assert.equal(manifest.exports?.['./client'], './lib/client.js');
+assert.equal(manifest.exports?.['./locale/*.json'], './locale/*.json');
+assert.equal(manifest.exports?.['./icon'], './icon.svg');
+assert.equal(manifest.icon, './icon.svg');
+assert.equal(manifest.engines?.dsh, '>=0.2.0 <0.3.0');
 assert.equal(manifest.dsh?.bundle?.patch, './cordis.patch.yml');
+
+// Display metadata is read without activating the plugin: both locales must
+// carry a real title and description, and the icon must be a self-contained
+// image no larger than the panel accepts.
+for (const locale of ['en', 'zh']) {
+  const dictionary = JSON.parse(await readFile(new URL(`locale/${locale}.json`, root), 'utf8'));
+  assert.equal(typeof dictionary.meta?.title, 'string', `${locale} meta.title`);
+  assert.ok(dictionary.meta.title.trim() !== '', `${locale} meta.title must be non-empty`);
+  assert.equal(typeof dictionary.meta?.description, 'string', `${locale} meta.description`);
+  assert.ok(dictionary.meta.description.trim() !== '', `${locale} meta.description must be non-empty`);
+}
+const zhMeta = JSON.parse(await readFile(new URL('locale/zh.json', root), 'utf8')).meta;
+assert.notEqual(zhMeta.title, 'dsh-better-workspaces', 'the Chinese title must be a display name, not the package name');
+const icon = await readFile(new URL('icon.svg', root));
+assert.ok(icon.length > 0 && icon.length <= 256 * 1024, 'icon.svg must fit the 256 KiB panel limit');
+assert.match(icon.toString('utf8'), /<svg[\s>]/, 'icon.svg must be SVG');
+assert.doesNotMatch(icon.toString('utf8'), /<script[\s>]/i, 'icon.svg must be self-contained artwork');
 
 const npmCommand = process.env.npm_execpath ? process.execPath : 'npm';
 const npmArgs = process.env.npm_execpath
@@ -35,6 +56,9 @@ for (const required of [
   'LICENSES/paseo-Apache-2.0.txt',
   'LICENSES/dsh-git-worktree-MIT.txt',
   'cordis.patch.yml',
+  'locale/en.json',
+  'locale/zh.json',
+  'icon.svg',
   'lib/index.js',
   'lib/client.js',
 ]) {

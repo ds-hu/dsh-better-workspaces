@@ -414,6 +414,30 @@ try {
   assert.equal((await request('/worktrees/cleanup', jsonInit({ cwd: managedOne.path }))).status, 403);
   roots = [repo, nested, plain];
 
+  // DSH 0.2.1 can move a Session into a native Git worktree without this
+  // plugin's metadata. A worktree of an exact registered main checkout is a
+  // repository-family capability; a subdirectory of it and a worktree of an
+  // unregistered checkout remain unauthorized.
+  const nativeMain = join(sandbox, 'native-worktree-main');
+  initRepo(nativeMain);
+  const nativeChild = join(sandbox, 'native-worktree-child');
+  git(nativeMain, 'worktree', 'add', '-b', 'native-child', nativeChild, 'main');
+  mkdirSync(join(nativeChild, 'subdir'));
+  const nativeAuthorizer = createWorkspaceAuthorizer({ workspaceRoots: () => [nativeMain] });
+  const nativeAuth = await nativeAuthorizer.authorize(nativeChild);
+  assert.equal(nativeAuth.ok, true, JSON.stringify(nativeAuth));
+  assert.equal(nativeAuth.kind, 'linked-worktree');
+  assert.equal(nativeAuth.gitBoundary, 'root');
+  assert.equal(nativeAuth.mainRepoRoot, nativeMain);
+  assert.equal((await nativeAuthorizer.authorize(join(nativeChild, 'subdir'))).ok, false,
+    'a worktree subdirectory is still not a Git root');
+  assert.equal((await createWorkspaceAuthorizer({ workspaceRoots: () => [plain] }).authorize(nativeChild)).ok, false,
+    'a worktree of an unregistered main checkout stays unauthorized');
+  roots = [nativeMain];
+  assert.equal((await request(`/snapshot?cwd=${encodeURIComponent(nativeChild)}`)).status, 200,
+    'the API accepts a native worktree while its main checkout is registered');
+  roots = [repo, nested, plain];
+
   // merge-to-base may target another linked worktree; that target needs its
   // own authority unless it is the server-derived main checkout.
   const mergeFamily = join(sandbox, 'merge-family');

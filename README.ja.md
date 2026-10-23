@@ -4,6 +4,8 @@
 
 DeepSeek Harness Web GUI に Git worktree、差分ビューア、Pull Request および Issue 連携を統合します。1 つのタスクに 1 つの独立したブランチと作業ディレクトリを割り当て、最初のプロンプト入力からコミット・プッシュまで、ブラウザの 1 画面で完結します。
 
+**プラグイン一覧での名前：** 工作区增强 · Better Workspaces。
+
 ---
 
 ## 主な機能
