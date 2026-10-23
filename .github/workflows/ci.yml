@@ -26,3 +26,29 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+
+  # The Ubuntu job above is the full gate. This one exists because the other
+  # half of the implementation — the Windows path model (ADR 0013): canonical
+  # paths instead of dirfds, stat dev/ino identity checks, CAS + rename saves —
+  # is invisible to Linux, and the suite spent a long time never being run here.
+  # The cases that need a POSIX shell, POSIX file names or /proc report
+  # SKIP <label>: <reason> rather than passing; they are covered above.
+  windows:
+    name: Windows path model (Node 22)
+    runs-on: windows-latest
+    # Spawn-bound: each `git` invocation pays process creation plus antivirus.
+    # Measured worst case on a workstation is ~20 minutes for these three suites.
+    timeout-minutes: 45
+    steps:
+      # Before checkout: the repository ships no .gitattributes, and the suites
+      # compare exact bytes, so a CRLF checkout would fail hundreds of asserts.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run test:host -- --progress
+      - run: npm run test:security
+      - run: npm run test:mount

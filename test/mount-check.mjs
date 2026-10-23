@@ -9,7 +9,13 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+
+// Nothing here may read the real ~/.dsh: the built-in worktree base resolves
+// from DSH_HOME, and configuring another base makes the mount scan the built-in
+// one for checkouts it stranded (ADR 0017).
+process.env.DSH_HOME = join(mkdtempSync(join(tmpdir(), 'dsh-bw-mount-home-')), 'dshhome');
+mkdirSync(process.env.DSH_HOME, { recursive: true });
 
 const MODULES = [
   '../lib/git.js',
@@ -32,6 +38,10 @@ for (const spec of MODULES) {
     process.exit(1);
   }
 }
+
+// Same module instance the mount configures, so the assertions below observe
+// the real override rather than a fresh copy.
+const { defaultWorktreesRoot, worktreesRoot } = await import('../lib/worktree.js');
 
 function fakeCtx({ withWebServer, registerThrows = false }) {
   const effects = [];
@@ -327,6 +337,52 @@ for (const withWebServer of [false, true]) {
     console.log(`APPLY FAIL (webServer=${withWebServer})\n${e && e.stack ? e.stack : e}`);
     process.exit(1);
   }
+}
+
+/* ---------------- worktreesDir config (ADR 0017) ----------------
+ * The row's `config` is the only way to move the managed namespace, so the
+ * mount must honour it, restore the built-in base when the key disappears (a
+ * live config change re-applies the row without it), and refuse a value it
+ * cannot honour instead of silently falling back to a different directory.
+ */
+{
+  const configuredBase = join(tmpdir(), `dsh-bw-base-${process.pid}`);
+  // Every apply() starts the state hub's tick/prune intervals, so a mount that
+  // is not disposed keeps the event loop (and therefore this script) alive
+  // after the last assertion. Dispose exactly as the loop above does.
+  const mount = async (config) => {
+    const fake = fakeCtx({ withWebServer: false });
+    try {
+      plugin.apply(fake.ctx, config);
+    } finally {
+      for (const entry of fake.effects) {
+        let disposer = null;
+        try {
+          disposer = entry.factory();
+        } finally {
+          if (typeof disposer === 'function') await disposer();
+        }
+      }
+    }
+  };
+
+  await mount({ worktreesDir: configuredBase });
+  assert.equal(worktreesRoot(), resolve(configuredBase), 'a configured worktreesDir becomes the managed base');
+  await mount(undefined);
+  assert.equal(worktreesRoot(), defaultWorktreesRoot(), 'an unconfigured mount restores the built-in base');
+
+  await assert.rejects(mount({ worktreesDir: 'relative/dir' }), /worktreesDir must be an absolute path/);
+  assert.equal(worktreesRoot(), defaultWorktreesRoot(), 'a refused value cannot leave a half-applied base');
+  await assert.rejects(
+    mount({ worktreeDir: configuredBase }),
+    /unknown plugin config key/,
+    'a misspelled key must fail loudly: ignoring it would move worktrees silently',
+  );
+  await assert.rejects(
+    mount({ worktreesDir: configuredBase, extra: true }),
+    /unknown plugin config key/,
+  );
+  console.log('worktreesDir config ok');
 }
 
 // A duplicate route must dispose the API heartbeat immediately; the simulated

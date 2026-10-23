@@ -6,16 +6,19 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, statSync, renameSync, readdirSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { tmpdir, homedir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
 import http from 'node:http';
 
-const scratch = mkdtempSync(join(tmpdir(), 'dsh-bw-test-'));
+// DSH_BW_TEST_TMP moves the scratch tree (thousands of files, and every one of
+// them is scanned on Windows): point it at an antivirus-excluded or faster volume.
+const scratchRoot = process.env.DSH_BW_TEST_TMP?.trim() || tmpdir();
+const scratch = mkdtempSync(join(scratchRoot, 'dsh-bw-test-'));
 process.env.DSH_HOME = join(scratch, 'dshhome');
 mkdirSync(process.env.DSH_HOME, { recursive: true });
 
 const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, listCommits, unpushedShas } = await import('../lib/git.js');
-const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt } = await import('../lib/worktree.js');
+const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../lib/worktree.js');
 const { computeDiff, commitDiff } = await import('../lib/diff.js');
 const { commitAction, pullAction, pushAction, discardAction, updateFromBaseAction, createPrAction, buildActionLadder } = await import('../lib/actions.js');
 const { createGitStateHub } = await import('../lib/state.js');
@@ -24,9 +27,23 @@ const { listForgeItems, pullRequestDetail, invalidateGhAuth, invalidateForgeList
 const { createCleanupScheduler, createCreationSourceGuard, assertWorkspaceArchivable, deleteWorkspace } = await import('../lib/index.js');
 const { hostMutationCoordinator } = await import('../lib/mutation.js');
 const { createWorkspaceAuthorizer } = await import('../lib/authorize.js');
+const { normalizeGitPath, isFileExchangeSupported } = await import('../lib/stable.js');
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+
+// `git init` copies git's sample hooks into every fixture repo: 27 files per
+// throwaway repository, all of them freshly written and scanned. An empty
+// template cuts that to 9 and saved ~150 ms per repo on Windows. No fixture
+// relies on the samples — the ones that exercise hooks write their own.
+const emptyGitTemplate = join(scratch, 'empty-git-template');
+mkdirSync(emptyGitTemplate, { recursive: true });
+function gitInit(cwd, ...args) {
+  // The option goes first: one fixture passes a positional directory
+  // (`git init --separate-git-dir <dir> <work>`), and Git stops parsing options
+  // at the first non-option argument.
+  return git(cwd, 'init', `--template=${emptyGitTemplate}`, ...args);
 }
 
 function verifiedPull(repoRoot, pull) {
@@ -40,13 +57,59 @@ function verifiedPull(repoRoot, pull) {
 }
 
 const results = [];
+// The suite prints nothing until it finishes, which makes a stalled run
+// indistinguishable from a slow one (a 3000-line suite on Windows takes
+// minutes, not seconds). `--progress` (or DSH_BW_TEST_PROGRESS=1) streams one
+// line per case instead, with its duration.
+const progress = process.env.DSH_BW_TEST_PROGRESS === '1' || process.argv.includes('--progress');
+// `--only=a,b` runs just the cases whose label contains one of the needles.
+// Opt-in and loud: several cases share fixtures created by earlier ones, so a
+// filtered run is for the self-contained cases (and for re-checking a failure)
+// — never a substitute for the full suite.
+const only = (process.argv.find((arg) => arg.startsWith('--only=')) ?? '')
+  .slice('--only='.length)
+  .split(',')
+  .map((needle) => needle.trim())
+  .filter(Boolean);
+if (only.length > 0) console.log(`(filtered run: ${only.join(', ')})`);
+
+/**
+ * A case whose fixture cannot exist on this platform. Returned from a test body,
+ * it is recorded as `SKIP <label>: <reason>` — never as a pass: a skip says the
+ * fixture is impossible here, it says nothing about the guard it would prove.
+ */
+const skipped = (reason) => ({ skipReason: reason });
+// These deadlines assert ORDER, not latency: the request must eventually reach
+// the mutation gate while another holder is inside it. On Windows a single
+// spawned `git` call can take seconds, so a 3 s budget reported "did not reach"
+// for a gate that was simply still waiting its turn.
+const GATE_WAIT_MS = 30_000;
+const POSIX_FIXTURE = process.platform === 'win32'
+  ? 'fixture needs a POSIX shell, /usr/bin/git and process-group kill'
+  : null;
+
 async function test(label, fn) {
+  if (only.length > 0 && !only.some((needle) => label.includes(needle))) return;
+  const startedAt = Date.now();
+  if (progress) console.log(`-> ${label}`);
   try {
-    await fn();
+    const outcome = await fn();
+    const skipReason = outcome && typeof outcome === 'object' ? outcome.skipReason : null;
+    if (skipReason) {
+      results.push(`SKIP ${label}: ${skipReason}`);
+      if (progress) console.log(`   SKIP ${label}: ${skipReason}`);
+      return;
+    }
     results.push(`PASS ${label}`);
+    if (progress) console.log(`   PASS ${label} (${Date.now() - startedAt} ms)`);
   } catch (error) {
     const detail = typeof error?.stack === 'string' ? error.stack : String(error?.message ?? error);
     results.push(`FAIL ${label}: ${detail}`);
+    if (progress) {
+      // Full detail, not just the message: a failure in progress mode should be
+      // diagnosable without waiting for the summary.
+      console.log(`   FAIL ${label} (${Date.now() - startedAt} ms)\n${detail}`);
+    }
     process.exitCode = 1;
   }
 }
@@ -54,7 +117,7 @@ async function test(label, fn) {
 /* ---------------- fixture repo ---------------- */
 const repo = join(scratch, 'main-repo');
 mkdirSync(repo);
-git(repo, 'init', '-b', 'main');
+gitInit(repo, '-b', 'main');
 git(repo, 'config', 'user.email', 'test@dsh.local');
 git(repo, 'config', 'user.name', 'DSH Test');
 writeFileSync(join(repo, 'a.txt'), 'alpha\nbeta\n');
@@ -120,11 +183,14 @@ await test('runGit limiter preserves each caller pinned environment', async () =
     runGit(['rev-parse', '--show-toplevel'], { cwd: scratch }));
   const result = await pinned;
   assert.equal(result.ok, true, result.stderr);
-  assert.equal(result.stdout.trim(), repo);
+  // Git prints forward slashes on Windows; the fixture path uses the platform
+  // separator, so compare through the platform normalizer (ADR 0013), not ===.
+  assert.equal(normalizeGitPath(result.stdout.trim()), normalizeGitPath(repo));
   await Promise.all(blockers);
 });
 
 await test('parent-guarded Git cannot outlive a killed Host worker', async () => {
+  if (POSIX_FIXTURE) return skipped(POSIX_FIXTURE);
   const bin = join(scratch, 'parent-guard-bin');
   const started = join(scratch, 'parent-guard-started');
   const finished = join(scratch, 'parent-guard-finished');
@@ -180,7 +246,7 @@ await test('git observation failures are explicit unknowns', async () => {
 await test('broken HEAD is not misclassified as unborn', async () => {
   const broken = join(scratch, 'broken-head');
   mkdirSync(broken);
-  git(broken, 'init', '-b', 'main');
+  gitInit(broken, '-b', 'main');
   git(broken, 'config', 'user.email', 'test@dsh.local');
   git(broken, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(broken, 'tracked.txt'), 'committed\n');
@@ -215,9 +281,16 @@ await test('broken HEAD is not misclassified as unborn', async () => {
 });
 
 await test('porcelain -z preserves special and rename paths; no-newline text counts one line', async () => {
+  // Every fixture here is a name NTFS cannot represent: control characters
+  // (newline, bell, vertical tab), a double quote, and a literal backslash,
+  // which is a path separator on Windows. The case proves C-quoted `-z`
+  // decoding, a POSIX-only file-name space, so it cannot run here.
+  if (process.platform === 'win32') {
+    return skipped('Windows file names cannot carry control characters, quotes or a literal backslash');
+  }
   const special = join(scratch, 'special-paths');
   mkdirSync(special);
-  git(special, 'init', '-b', 'main');
+  gitInit(special, '-b', 'main');
   git(special, 'config', 'user.email', 'test@dsh.local');
   git(special, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(special, 'old name.txt'), 'old\nkeep\nstay\n');
@@ -264,7 +337,7 @@ await test('porcelain -z preserves special and rename paths; no-newline text cou
 await test('discard handles a true unborn repository without a fake reset failure', async () => {
   const unborn = join(scratch, 'unborn-discard');
   mkdirSync(unborn);
-  git(unborn, 'init', '-b', 'main');
+  gitInit(unborn, '-b', 'main');
   git(unborn, 'config', 'user.email', 'test@dsh.local');
   git(unborn, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(unborn, 'only-untracked.txt'), 'temporary\n');
@@ -287,7 +360,7 @@ await test('discard handles a true unborn repository without a fake reset failur
 await test('host commit ignores repository hooks', async () => {
   const hooked = join(scratch, 'hooked-commit');
   mkdirSync(hooked);
-  git(hooked, 'init', '-b', 'main');
+  gitInit(hooked, '-b', 'main');
   git(hooked, 'config', 'user.email', 'test@dsh.local');
   git(hooked, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(hooked, 'file.txt'), 'before\n');
@@ -307,7 +380,7 @@ await test('host commit ignores repository hooks', async () => {
 await test('host commit refuses repository-defined clean filters', async () => {
   const filtered = join(scratch, 'filtered-commit');
   mkdirSync(filtered);
-  git(filtered, 'init', '-b', 'main');
+  gitInit(filtered, '-b', 'main');
   git(filtered, 'config', 'user.email', 'test@dsh.local');
   git(filtered, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(filtered, 'tracked.txt'), 'one\n');
@@ -327,19 +400,25 @@ await test('host commit refuses repository-defined clean filters', async () => {
 });
 
 await test('Git-derived branch names cannot become push options', async () => {
+  // The malicious branch name embeds an absolute payload path. On Windows that
+  // path carries a drive colon and backslashes, which are illegal in a ref name
+  // — the fixture cannot be constructed, so this case cannot run here.
+  if (process.platform === 'win32') {
+    return skipped('a Windows absolute path is not a legal ref name, so the hostile branch cannot exist');
+  }
   const optionRepo = join(scratch, 'option-branch');
   const optionRemote = join(scratch, 'option-remote.git');
   const marker = join(scratch, 'receive-pack-option-ran');
   const payload = join(scratch, 'receive-pack-option');
   mkdirSync(optionRepo);
-  git(optionRepo, 'init', '-b', 'main');
+  gitInit(optionRepo, '-b', 'main');
   git(optionRepo, 'config', 'user.email', 'test@dsh.local');
   git(optionRepo, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(optionRepo, 'tracked.txt'), 'one\n');
   git(optionRepo, 'add', '-A');
   git(optionRepo, 'commit', '-m', 'initial');
   mkdirSync(optionRemote);
-  git(optionRemote, 'init', '--bare');
+  gitInit(optionRemote, '--bare');
   git(optionRepo, 'remote', 'add', 'origin', optionRemote);
   writeFileSync(payload, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 1\n`);
   chmodSync(payload, 0o755);
@@ -354,7 +433,7 @@ await test('Git-derived branch names cannot become push options', async () => {
 await test('pull never aborts a pre-existing merge', async () => {
   const merging = join(scratch, 'preexisting-merge');
   mkdirSync(merging);
-  git(merging, 'init', '-b', 'main');
+  gitInit(merging, '-b', 'main');
   git(merging, 'config', 'user.email', 'test@dsh.local');
   git(merging, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(merging, 'conflict.txt'), 'base\n');
@@ -382,7 +461,7 @@ await test('pull pins merge mode and preserves conflicts for explicit recovery',
   const remote = join(scratch, 'pull-remote.git');
   const peer = join(scratch, 'pull-peer');
   mkdirSync(local);
-  git(local, 'init', '-b', 'main');
+  gitInit(local, '-b', 'main');
   git(local, 'config', 'user.email', 'test@dsh.local');
   git(local, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(local, 'conflict.txt'), 'base\n');
@@ -523,7 +602,7 @@ await test('recovery refuses a same-path replacement main repository', async () 
   const ownerRepo = join(scratch, 'owner-identity-repo');
   const movedRepo = join(scratch, 'owner-identity-repo-old');
   mkdirSync(ownerRepo);
-  git(ownerRepo, 'init', '-b', 'main');
+  gitInit(ownerRepo, '-b', 'main');
   git(ownerRepo, 'config', 'user.email', 'test@dsh.local');
   git(ownerRepo, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(ownerRepo, 'base.txt'), 'base\n');
@@ -550,7 +629,7 @@ await test('recovery refuses a same-path replacement main repository', async () 
 await test('update-from-base preserves conflicts and never aborts external recovery', async () => {
   const mergeRepo = join(scratch, 'owned-merge-repo');
   mkdirSync(mergeRepo);
-  git(mergeRepo, 'init', '-b', 'main');
+  gitInit(mergeRepo, '-b', 'main');
   git(mergeRepo, 'config', 'user.email', 'test@dsh.local');
   git(mergeRepo, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(mergeRepo, 'conflict.txt'), 'base\n');
@@ -594,7 +673,7 @@ await test('update-from-base preserves conflicts and never aborts external recov
 await test('branch-off uses the immutable base OID across a moving branch', async () => {
   const movingRepo = join(scratch, 'moving-base-repo');
   mkdirSync(movingRepo);
-  git(movingRepo, 'init', '-b', 'main');
+  gitInit(movingRepo, '-b', 'main');
   git(movingRepo, 'config', 'user.email', 'test@dsh.local');
   git(movingRepo, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(movingRepo, 'base.txt'), 'one\n');
@@ -734,7 +813,7 @@ await test('hub supports an authorized root with a separate Git directory', asyn
   const work = join(scratch, 'separate-work');
   const gitDir = join(scratch, 'separate-git');
   mkdirSync(work);
-  git(scratch, 'init', '--separate-git-dir', gitDir, work);
+  gitInit(scratch, '--separate-git-dir', gitDir, work);
   git(work, 'config', 'user.email', 'test@example.com');
   git(work, 'config', 'user.name', 'Test');
   writeFileSync(join(work, 'tracked.txt'), 'separate\n');
@@ -771,12 +850,17 @@ await test('hub snapshotFor + fingerprint + invalidate', async () => {
     assert.equal(snap.pr, null);
     const neg = await hub.snapshotFor(scratch);
     assert.equal(neg.isGit, false);
-    // mutate → invalidate → dirty snapshot emitted via SSE path
+    // mutate → invalidate → dirty snapshot emitted via SSE path. Await the
+    // invalidation instead of sleeping a fixed 800 ms: the recompute is several
+    // Git calls, which on a slow host easily outlives any fixed sleep — and when
+    // it did, `snapshotFor` answered from the still-recent cache.
     writeFileSync(join(wt1.path, 'b.txt'), 'one\ntwo\n');
-    hub.invalidate(wt1.path);
-    await new Promise((r) => setTimeout(r, 800));
-    const snap2 = await hub.snapshotFor(wt1.path);
-    assert.equal(snap2.dirty, true);
+    const snap2 = await hub.invalidate(wt1.path);
+    assert.equal(snap2?.dirty, true, 'invalidate() recomputes the target');
+    const emitDeadline = Date.now() + 5000;
+    while (emitted.length === 0 && Date.now() < emitDeadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
     assert.ok(emitted.length >= 1, 'onChange emitted at least once');
     git(wt1.path, 'checkout', '--', 'b.txt');
   } finally {
@@ -856,7 +940,7 @@ await test('hub background compute drops a revoked Workspace capability', async 
     let revokeTimeout;
     await Promise.race([
       revokedCheck,
-      new Promise((_, reject) => { revokeTimeout = setTimeout(() => reject(new Error('background compute did not reauthorize')), 3000); }),
+      new Promise((_, reject) => { revokeTimeout = setTimeout(() => reject(new Error('background compute did not reauthorize')), GATE_WAIT_MS); }),
     ]);
     clearTimeout(revokeTimeout);
     await new Promise((resolveTurn) => setImmediate(resolveTurn));
@@ -1008,6 +1092,10 @@ await test('archive reports locked worktree removal instead of false success', a
 });
 
 await test('non-force archive closes the inspect/remove race', async () => {
+  // The wrapper is a `#!/bin/sh` script found via PATH, and the PATH separator
+  // is hard-coded to ':'. Windows cannot exec a shell script as `git`, so the
+  // race fixture only exists on POSIX.
+  if (POSIX_FIXTURE) return skipped(POSIX_FIXTURE);
   const raced = await createWorktree({ repoRoot: repo, base: 'main', intent: 'branch-off', branchName: 'raced-archive' });
   const wrapperDir = join(scratch, 'git-race-wrapper');
   mkdirSync(wrapperDir);
@@ -1063,7 +1151,7 @@ const prRepo = join(scratch, 'pr-clone');
 const prForkRemote = join(scratch, 'pr-fork-remote.git');
 const prForkRepo = join(scratch, 'pr-fork-clone');
 mkdirSync(prRemote);
-git(prRemote, 'init', '--bare', '-b', 'main');
+gitInit(prRemote, '--bare', '-b', 'main');
 cloneRepo(prRemote, prRepo);
 git(prRepo, 'config', 'user.email', 'test@dsh.local');
 git(prRepo, 'config', 'user.name', 'DSH Test');
@@ -1098,7 +1186,7 @@ const prLockedHead = pushPrHead(33, 'pr-locked', 'locked.txt', 'locked\n');
 // a contributor's fork clone: origin is the fork (no refs/pull/*), the base
 // repository — the one that does carry them — is `upstream`
 mkdirSync(prForkRemote);
-git(prForkRemote, 'init', '--bare', '-b', 'main');
+gitInit(prForkRemote, '--bare', '-b', 'main');
 git(prRepo, 'push', '--quiet', prForkRemote, 'main:main');
 cloneRepo(prForkRemote, prForkRepo);
 git(prForkRepo, 'remote', 'add', 'upstream', prRemote);
@@ -1465,7 +1553,7 @@ await test('exact Workspace deletion is session-safe, target-only, and retry-ide
 await test('api creation tx replays one durable Workspace and defers destructive registry deletion', async () => {
   const txRepo = join(scratch, 'creation-tx-repo');
   mkdirSync(txRepo);
-  git(txRepo, 'init', '-b', 'main');
+  gitInit(txRepo, '-b', 'main');
   git(txRepo, 'config', 'user.email', 'test@dsh.local');
   git(txRepo, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(txRepo, 'base.txt'), 'base\n');
@@ -1675,7 +1763,7 @@ await test('api creation tx replays one durable Workspace and defers destructive
 await test('creation source claim is a per-launcher lease, not a permanent lock', async () => {
   const leaseRepo = join(scratch, 'claim-lease-repo');
   mkdirSync(leaseRepo);
-  git(leaseRepo, 'init', '-b', 'main');
+  gitInit(leaseRepo, '-b', 'main');
   git(leaseRepo, 'config', 'user.email', 'test@dsh.local');
   git(leaseRepo, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(leaseRepo, 'base.txt'), 'base\n');
@@ -1738,7 +1826,7 @@ await test('creation source claim is a per-launcher lease, not a permanent lock'
 await test('api creation adopts a managed root that predates the owner record', async () => {
   const legacyRepo = join(scratch, 'legacy-root-repo');
   mkdirSync(legacyRepo);
-  git(legacyRepo, 'init', '-b', 'main');
+  gitInit(legacyRepo, '-b', 'main');
   git(legacyRepo, 'config', 'user.email', 'test@dsh.local');
   git(legacyRepo, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(legacyRepo, 'base.txt'), 'base\n');
@@ -1820,7 +1908,7 @@ await test('api creation adopts a managed root that predates the owner record', 
 await test('api serializes same-repo worktree creation and actions', async () => {
   const parallelRepo = join(scratch, 'parallel-api-repo');
   mkdirSync(parallelRepo);
-  git(parallelRepo, 'init', '-b', 'main');
+  gitInit(parallelRepo, '-b', 'main');
   git(parallelRepo, 'config', 'user.email', 'test@dsh.local');
   git(parallelRepo, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(parallelRepo, 'tracked.txt'), 'one\n');
@@ -1893,7 +1981,7 @@ await test('api serializes same-repo worktree creation and actions', async () =>
     let archiveTimeout;
     await Promise.race([
       archiveQueued,
-      new Promise((_, reject) => { archiveTimeout = setTimeout(() => reject(new Error('archive did not reach mutation gate')), 3000); }),
+      new Promise((_, reject) => { archiveTimeout = setTimeout(() => reject(new Error('archive did not reach mutation gate')), GATE_WAIT_MS); }),
     ]);
     clearTimeout(archiveTimeout);
     observeMutation = null;
@@ -1915,7 +2003,7 @@ await test('api serializes same-repo worktree creation and actions', async () =>
     let disposeTimeout;
     await Promise.race([
       disposeQueued,
-      new Promise((_, reject) => { disposeTimeout = setTimeout(() => reject(new Error('dispose archive did not reach mutation gate')), 3000); }),
+      new Promise((_, reject) => { disposeTimeout = setTimeout(() => reject(new Error('dispose archive did not reach mutation gate')), GATE_WAIT_MS); }),
     ]);
     clearTimeout(disposeTimeout);
     observeMutation = null;
@@ -2052,24 +2140,30 @@ await test('api routes over real HTTP', async () => {
     const writeOk = await post('/file', { cwd: repo, path: 'editable.txt', content: 'two\n', baseSha1: baseSha });
     if (writeOk.ok) {
       assert.equal(readFileSync(editable, 'utf8'), 'two\n');
-      exchangeRace = () => writeFileSync(editable, 'external-race\n');
-      let racedSave;
-      try {
-        racedSave = await post('/file', {
-          cwd: repo,
-          path: 'editable.txt',
-          content: 'must-not-win\n',
-          baseSha1: createHash('sha1').update(Buffer.from('two\n')).digest('hex'),
-        });
-      } finally {
-        exchangeRace = null;
+      // The external writer below is injected through `beforeFileExchange`, which
+      // only exists on the Linux RENAME_EXCHANGE path (ADR 0013). On the path
+      // model there is no exchange step to race, so the CAS save simply wins and
+      // the probe would assert a platform the implementation does not claim.
+      if (isFileExchangeSupported()) {
+        exchangeRace = () => writeFileSync(editable, 'external-race\n');
+        let racedSave;
+        try {
+          racedSave = await post('/file', {
+            cwd: repo,
+            path: 'editable.txt',
+            content: 'must-not-win\n',
+            baseSha1: createHash('sha1').update(Buffer.from('two\n')).digest('hex'),
+          });
+        } finally {
+          exchangeRace = null;
+        }
+        assert.equal(racedSave.ok, false);
+        assert.equal(racedSave.error, 'conflict');
+        assert.equal(racedSave.message, 'file changed on disk during save');
+        assert.equal('recovery' in racedSave, false, 'owned temporary file was removed before the conflict response');
+        assert.equal(readFileSync(editable, 'utf8'), 'external-race\n', 'the concurrent writer remains authoritative');
+        assert.equal(readdirSync(repo).some((name) => name.startsWith('.bw-') && name.endsWith('.tmp')), false);
       }
-      assert.equal(racedSave.ok, false);
-      assert.equal(racedSave.error, 'conflict');
-      assert.equal(racedSave.message, 'file changed on disk during save');
-      assert.equal('recovery' in racedSave, false, 'owned temporary file was removed before the conflict response');
-      assert.equal(readFileSync(editable, 'utf8'), 'external-race\n', 'the concurrent writer remains authoritative');
-      assert.equal(readdirSync(repo).some((name) => name.startsWith('.bw-') && name.endsWith('.tmp')), false);
     } else {
       assert.match(String(writeOk.error || writeOk.message || JSON.stringify(writeOk)), /atomic file exchange unavailable/);
       assert.equal(readFileSync(editable, 'utf8'), 'one\n', 'an unavailable exchange primitive fails closed');
@@ -2150,6 +2244,16 @@ await test('api routes over real HTTP', async () => {
 /* ---------------- forge: the gh CLI, /pulls + /pull ---------------- */
 
 const forgeIdentity = { host: 'github.com', owner: 'acme', repo: 'widget' };
+
+// A Windows-hostable fake `gh` would have to be a real executable: this fixture
+// is a `#!/bin/sh` script found through a `:`-separated PATH, which Windows
+// neither executes nor searches. Without it the *real* `gh` runs, reaches
+// github.com over the network and answers `authState: 'error'` — which is how
+// five cases spent the whole suite's wall-clock time before this guard existed.
+// They therefore run on POSIX only; the CLI-missing case still runs everywhere.
+const FAKE_GH_POSIX_ONLY = process.platform === 'win32'
+  ? 'fake gh is a #!/bin/sh script found through a `:`-separated PATH; Windows would run the real gh and hit the network'
+  : null;
 
 // `lib/forge.js` shells out to the real `gh`, so the CLI itself is the fixture:
 // a fake executable EARLY in PATH whose JSON mirrors `gh --json` exactly
@@ -2316,6 +2420,18 @@ writeFileSync(join(fakeGHDir, 'gh'), fakeGH, { mode: 0o755 });
 process.env.FAKE_GH_DIR = fakeGHDir;
 // before any real gh installation on this machine
 process.env.PATH = `${fakeGHDir}:${process.env.PATH}`;
+// Prove the fixture is the binary PATH resolves. Without this, a fake that is
+// not executable/findable silently defers to the real `gh`, which answers from
+// github.com: five cases then depend on the network and the token on the box,
+// and the suite takes minutes longer. POSIX only — see FAKE_GH_POSIX_ONLY.
+if (!FAKE_GH_POSIX_ONLY) {
+  const fakeVersion = execFileSync('gh', ['--version'], { encoding: 'utf8' });
+  assert.match(
+    fakeVersion,
+    /9\.9\.9-fake/,
+    `PATH must resolve the fake gh, not the real CLI: ${fakeVersion.trim().slice(0, 120)}`,
+  );
+}
 
 await test('forge: canonical remote parsing covers GitHub and enterprise URL forms', async () => {
   const expected = { host: 'ghe.example.test', owner: 'Acme', repo: 'Widget' };
@@ -2329,6 +2445,7 @@ await test('forge: canonical remote parsing covers GitHub and enterprise URL for
 });
 
 await test('forge: PR status isolates host auth, GraphQL calls, and caches', async () => {
+  if (FAKE_GH_POSIX_ONLY) return skipped(FAKE_GH_POSIX_ONLY);
   rmSync(fakeGHLog, { force: true });
   invalidateGhAuth();
   invalidatePr('');
@@ -2386,6 +2503,7 @@ await test('forge: gh missing from PATH → cli_missing', async () => {
 });
 
 await test('forge: auth states + gh JSON flattening (list + detail)', async () => {
+  if (FAKE_GH_POSIX_ONLY) return skipped(FAKE_GH_POSIX_ONLY);
   assert.equal(await ghAvailable(), true, 'the process-wide probe must find the fake gh');
 
   // gh exists but `gh auth status` fails
@@ -2480,6 +2598,7 @@ await test('forge: auth states + gh JSON flattening (list + detail)', async () =
 });
 
 await test('forge: a repository with disabled issues keeps the pull request list intact', async () => {
+  if (FAKE_GH_POSIX_ONLY) return skipped(FAKE_GH_POSIX_ONLY);
   process.env.FAKE_GH_ISSUES_DISABLED = '1';
   invalidateForgeList();
   let listed;
@@ -2499,6 +2618,7 @@ await test('forge: a repository with disabled issues keeps the pull request list
 });
 
 await test('forge: a partial listing names the failing side', async () => {
+  if (FAKE_GH_POSIX_ONLY) return skipped(FAKE_GH_POSIX_ONLY);
   process.env.FAKE_GH_PULLS_FAIL = '1';
   invalidateForgeList();
   let pullsFailed;
@@ -2527,6 +2647,7 @@ await test('forge: a partial listing names the failing side', async () => {
 });
 
 await test('api: /pulls + /pull over real HTTP (fake gh)', async () => {
+  if (FAKE_GH_POSIX_ONLY) return skipped(FAKE_GH_POSIX_ONLY);
   rmSync(fakeGHLog, { force: true });
   const hub = createGitStateHub({ onChange: () => {} });
   const api = createApi(hub, { workspaceRoots: () => [prRepo, scratch], resolveForgeIdentity: async () => forgeIdentity });
@@ -2774,7 +2895,7 @@ await test('cleanup sweep: dry-run, guards, archive + workspace delete', async (
   // destructive boundary and must still prevent archival.
   const raceRepo = join(scratch, 'cleanup-session-race-repo');
   mkdirSync(raceRepo);
-  git(raceRepo, 'init', '-b', 'main');
+  gitInit(raceRepo, '-b', 'main');
   git(raceRepo, 'config', 'user.email', 'test@dsh.local');
   git(raceRepo, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(raceRepo, 'tracked.txt'), 'one\n');
@@ -2884,7 +3005,7 @@ await test('cleanup abandoned sweep: unreferenced+old only', async () => {
 
   const abandonedRaceRepo = join(scratch, 'cleanup-abandoned-race-repo');
   mkdirSync(abandonedRaceRepo);
-  git(abandonedRaceRepo, 'init', '-b', 'main');
+  gitInit(abandonedRaceRepo, '-b', 'main');
   git(abandonedRaceRepo, 'config', 'user.email', 'test@dsh.local');
   git(abandonedRaceRepo, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(abandonedRaceRepo, 'tracked.txt'), 'one\n');
@@ -2948,8 +3069,13 @@ await test('platform anchoring helpers', async () => {
     assert.equal(worktreeRowHasPath('worktree /tmp/a/wt\nbranch refs/heads/wt', '/tmp/a/wt-2'), false);
     // stat identity verification is the path-mode anchor proof
     const info = statSync(repo);
+    // A "different" identity must be one the platform can represent: an NTFS
+    // file index exceeds 2^53, where `ino + 1` rounds back to the same number
+    // and the mismatch silently becomes a false negative. A device bump always
+    // differs, and the inode probe uses a delta above the spacing of that range.
     assert.equal(await stable.verifyStatIdentity(repo, { dev: info.dev, ino: info.ino }), true);
-    assert.equal(await stable.verifyStatIdentity(repo, { dev: info.dev, ino: info.ino + 1 }), false);
+    assert.equal(await stable.verifyStatIdentity(repo, { dev: info.dev + 1, ino: info.ino }), false);
+    assert.equal(await stable.verifyStatIdentity(repo, { dev: info.dev, ino: info.ino + 1_000_000 }), false);
     assert.equal(await stable.verifyStatIdentity(join(repo, 'missing-anchor'), { dev: info.dev, ino: info.ino }), false);
     assert.equal(await stable.verifyStatIdentity(repo, null), false);
   } finally {
@@ -2961,7 +3087,7 @@ await test('path mode (simulated win32): discovery, worktree creation, picker, e
   const stable = await import('../lib/stable.js');
   const pathRepo = join(scratch, 'path-mode-repo');
   mkdirSync(pathRepo);
-  git(pathRepo, 'init', '-b', 'main');
+  gitInit(pathRepo, '-b', 'main');
   git(pathRepo, 'config', 'user.email', 'test@dsh.local');
   git(pathRepo, 'config', 'user.name', 'DSH Test');
   writeFileSync(join(pathRepo, 'edit-me.txt'), 'before\n');
@@ -3057,6 +3183,107 @@ await test('path mode (simulated win32): discovery, worktree creation, picker, e
     api.dispose();
     server.close();
     await hub.dispose();
+  }
+});
+
+/* ---------------- worktreesDir configuration (ADR 0017) ----------------
+ * The base directory is the only layout constant a profile can set. These
+ * cases pin the three claims the documentation makes: the value replaces the
+ * built-in base, a relative value is refused rather than guessed, and moving
+ * the base leaves earlier managed checkouts outside the managed namespace
+ * (which is exactly what the boot-time warning reports).
+ */
+await test('normalizeWorktreesDir expands ~ and refuses anything not absolute', async () => {
+  assert.equal(normalizeWorktreesDir(undefined), null, 'absent config means "use the built-in base"');
+  assert.equal(normalizeWorktreesDir(null), null);
+  assert.equal(normalizeWorktreesDir(''), null);
+  assert.equal(normalizeWorktreesDir('~'), resolve(homedir()));
+  assert.equal(normalizeWorktreesDir(`~${sep}bw-wt`), resolve(homedir(), 'bw-wt'));
+  assert.equal(
+    normalizeWorktreesDir(`${scratch}${sep}custom-base${sep}`),
+    resolve(scratch, 'custom-base'),
+    'trailing separators are collapsed, so the value compares equal to the managed root',
+  );
+  // The plugin cannot know the caller's cwd: guessing here is how worktrees end
+  // up in a directory nobody looked at.
+  assert.throws(() => normalizeWorktreesDir('relative/wt'), /must be an absolute path/);
+  assert.throws(() => normalizeWorktreesDir(` ${scratch}`), /must be an absolute path/);
+  assert.throws(() => normalizeWorktreesDir(42), /must be a string/);
+});
+
+await test('worktreesDir moves creation, listing and validation to the new base', async () => {
+  const base = join(scratch, 'custom-base');
+  let created = null;
+  try {
+    configureWorktreesBaseDir(normalizeWorktreesDir(base));
+    assert.equal(worktreesRoot(), base);
+    created = await createWorktree({ repoRoot: repo, base: 'main', intent: 'branch-off', branchName: 'configured-base' });
+    const expectedGroup = join(base, projectHash(realpathSync(repo)));
+    assert.ok(created.path.startsWith(`${expectedGroup}${sep}`), `path under the configured base: ${created.path}`);
+    assert.equal(await repoWorktreesRoot(repo), expectedGroup);
+    assert.equal((await validateManagedWorktree(created.path)).ok, true, 'the configured base is a managed namespace');
+    assert.equal((await listManagedWorktrees(repo)).root, expectedGroup);
+
+    // Moving the base back is the documented consequence: managed identity is
+    // namespace membership, so the same checkout stops being managed. The
+    // refusal reason depends on whether this repository also has a group root
+    // under the new base: absent → `managed-root-unavailable`, present but not
+    // holding this path → `outside-managed-root`. Both mean "not managed".
+    configureWorktreesBaseDir(null);
+    assert.equal(worktreesRoot(), defaultWorktreesRoot());
+    const outside = await validateManagedWorktree(created.path);
+    assert.equal(outside.ok, false);
+    assert.ok(
+      ['outside-managed-root', 'managed-root-unavailable'].includes(outside.reason),
+      `a checkout outside the current base is not managed: ${outside.reason}`,
+    );
+
+    // ... and the boot-time diagnostic can still see it under the old base.
+    const stranded = await managedWorktreesUnder(base);
+    assert.ok(
+      stranded.some((item) => item.path === created.path),
+      `the stranded scan reports the checkout under the previous base: ${JSON.stringify(stranded)}`,
+    );
+
+    configureWorktreesBaseDir(normalizeWorktreesDir(base));
+    const archived = await archiveWorktree(created.path, { force: true });
+    assert.equal(archived.ok, true, JSON.stringify(archived));
+    created = null;
+  } finally {
+    if (created) await archiveWorktree(created.path, { force: true }).catch(() => {});
+    configureWorktreesBaseDir(null);
+  }
+});
+
+await test('managedWorktreesUnder finds default-base checkouts and ignores the new base', async () => {
+  const base = join(scratch, 'custom-base-empty');
+  const keeper = await createWorktree({ repoRoot: repo, base: 'main', intent: 'branch-off', branchName: 'stranded-keeper' });
+  try {
+    configureWorktreesBaseDir(normalizeWorktreesDir(base));
+    const stranded = await managedWorktreesUnder(defaultWorktreesRoot());
+    assert.ok(
+      stranded.some((item) => item.path === keeper.path),
+      `the default base still holds this checkout: ${JSON.stringify(stranded.map((item) => item.path))}`,
+    );
+    assert.deepEqual(await managedWorktreesUnder(base), [], 'a freshly configured base holds nothing yet');
+    assert.deepEqual(await managedWorktreesUnder(join(scratch, 'never-created')), [], 'a missing base is not an error');
+  } finally {
+    configureWorktreesBaseDir(null);
+    await archiveWorktree(keeper.path, { force: true }).catch(() => {});
+  }
+});
+
+await test('worktreesDir inside the main checkout is refused before it is created', async () => {
+  const nested = join(repo, 'nested-base');
+  try {
+    configureWorktreesBaseDir(normalizeWorktreesDir(nested));
+    await assert.rejects(
+      createWorktree({ repoRoot: repo, base: 'main', intent: 'branch-off', branchName: 'nested-base' }),
+      /inside the main checkout/,
+    );
+    assert.equal(existsSync(nested), false, 'the refusal happens before the base directory is created inside the repo');
+  } finally {
+    configureWorktreesBaseDir(null);
   }
 });
 

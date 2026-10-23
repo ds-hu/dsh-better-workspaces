@@ -19,7 +19,9 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-const sandbox = mkdtempSync(join(tmpdir(), 'dsh-bw-security-'));
+// DSH_BW_TEST_TMP moves the scratch tree onto a faster/excluded volume.
+const scratchRoot = process.env.DSH_BW_TEST_TMP?.trim() || tmpdir();
+const sandbox = mkdtempSync(join(scratchRoot, 'dsh-bw-security-'));
 process.env.DSH_HOME = join(sandbox, 'dsh-home');
 
 const { API_PREFIX, createApi, firstForwarded, isLoopbackPeer, sameOrigin } = await import('../lib/api.js');
@@ -32,9 +34,13 @@ function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
+const emptyGitTemplate = join(sandbox, 'empty-git-template');
+mkdirSync(emptyGitTemplate, { recursive: true });
+
 function initRepo(path) {
   mkdirSync(path, { recursive: true });
-  git(path, 'init', '-b', 'main');
+  // empty template: skip copying git's sample hooks into a throwaway fixture
+  git(path, 'init', '-b', 'main', `--template=${emptyGitTemplate}`);
   git(path, 'config', 'user.email', 'security@example.com');
   git(path, 'config', 'user.name', 'Security Test');
   writeFileSync(join(path, 'tracked.txt'), 'one\n');
@@ -202,12 +208,17 @@ try {
   writeFileSync(outsideHard, 'shared-before\n');
   chmodSync(outsideHard, 0o664);
   linkSync(outsideHard, insideHard);
+  // Compare against the mode the file actually has, not the requested 0o664:
+  // NTFS cannot represent group-write without owner-write, so the chmod above
+  // reads back as 0o666 there, and the property under test is that a save does
+  // not CHANGE the mode (a default-mode rename would).
+  const hardModeBefore = statSync(insideHard).mode & 0o777;
   const hardSha = createHash('sha1').update('shared-before\n').digest('hex');
   const savedHard = await request('/file', jsonInit({ cwd: repo, path: 'inside-hard.txt', content: 'inside-after\n', baseSha1: hardSha }));
   if (savedHard.status === 200) {
     assert.equal(readFileSync(insideHard, 'utf8'), 'inside-after\n');
     assert.equal(readFileSync(outsideHard, 'utf8'), 'shared-before\n');
-    assert.equal(statSync(insideHard).mode & 0o777, 0o664);
+    assert.equal(statSync(insideHard).mode & 0o777, hardModeBefore, 'the save preserves the file mode');
 
     // Same-base saves are serialized at the commit boundary: exactly one wins,
     // and the winner's bytes must be the bytes left on disk.
@@ -236,8 +247,11 @@ try {
   assert.equal((await request(`/raw?cwd=${encodeURIComponent(repo)}&path=${encodeURIComponent('.')}`)).status, 415);
 
   // Aborting raw responses must destroy the pipeline source and release its fd.
+  // Counting them needs Linux's /proc: macOS and Windows have no equivalent
+  // listing, so the abort loop still runs there but the leak assertion cannot.
   writeFileSync(join(repo, 'large.png'), Buffer.alloc(4 * 1024 * 1024, 1));
-  const fdBefore = readdirSync('/proc/self/fd').length;
+  const fdListing = process.platform === 'linux' ? '/proc/self/fd' : null;
+  const fdBefore = fdListing ? readdirSync(fdListing).length : 0;
   for (let index = 0; index < 20; index += 1) {
     await new Promise((resolveAbort, rejectAbort) => {
       const req = http.get(`${base}/raw?cwd=${encodeURIComponent(repo)}&path=large.png`, (response) => {
@@ -253,7 +267,7 @@ try {
     });
   }
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
-  assert.ok(readdirSync('/proc/self/fd').length <= fdBefore + 3, 'aborted raw streams release file descriptors');
+  if (fdListing) assert.ok(readdirSync(fdListing).length <= fdBefore + 3, 'aborted raw streams release file descriptors');
 
   // All POSTs are JSON-only and same-origin before any mutation/body dispatch.
   assert.equal((await request('/snapshots', { method: 'POST', body: '{}' })).status, 415);
@@ -372,14 +386,19 @@ try {
   assert.equal(existsSync(sentinel), false);
   rmSync(poisonedMetadata, { force: true });
 
-  for (const name of ['--output=x', ':(glob)**']) {
+  // Literal-pathspec probes: a hostile file NAME must never be read as a Git
+  // option or as pathspec magic. `:(glob)**` needs a colon in the file name,
+  // which NTFS forbids, so that half of the probe only exists on POSIX; the
+  // option-injection half (`--output=x`) runs everywhere.
+  const hostileNames = process.platform === 'win32' ? ['--output=x'] : ['--output=x', ':(glob)**'];
+  for (const name of hostileNames) {
     writeFileSync(join(repo, name), 'tracked\n');
   }
-  git(repo, 'add', '--', '--output=x', ':(literal):(glob)**');
+  git(repo, 'add', '--', ...hostileNames.map((name) => (name === ':(glob)**' ? ':(literal):(glob)**' : name)));
   git(repo, 'commit', '-m', 'literal pathspec probes');
   writeFileSync(join(repo, '--output=x'), 'modified output\n');
-  writeFileSync(join(repo, ':(glob)**'), 'modified glob\n');
-  for (const name of ['--output=x', ':(glob)**']) {
+  if (hostileNames.includes(':(glob)**')) writeFileSync(join(repo, ':(glob)**'), 'modified glob\n');
+  for (const name of hostileNames) {
     const result = await request(`/diff?cwd=${encodeURIComponent(repo)}&path=${encodeURIComponent(name)}`);
     assert.equal(result.status, 200, name);
     assert.deepEqual(result.body.files.map((file) => file.path), [name]);
