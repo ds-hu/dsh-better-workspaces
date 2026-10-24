@@ -140,13 +140,71 @@ git(repo, 'add', '-A');
 git(repo, 'commit', '-m', 'initial');
 git(repo, 'branch', 'feature');
 
-await test('detectRepo', async () => {
-  const d = await detectRepo(repo);
-  assert.equal(d.isGit, true);
-  assert.equal(d.repoRoot, repo);
-  assert.equal(d.isLinkedWorktree, false);
+await test('detectRepo: one rev-parse answers root, subdirectory, worktree, bare and non-repo', async () => {
+  const root = await detectRepo(repo);
+  assert.equal(root.isGit, true);
+  assert.equal(root.repoRoot, repo);
+  assert.equal(root.gitDir, join(repo, '.git'));
+  assert.equal(root.gitCommonDir, root.gitDir, 'a main checkout has a single Git directory');
+  assert.equal(root.isLinkedWorktree, false);
+  assert.equal(root.mainRepoRoot, repo);
   const outside = await detectRepo(scratch);
   assert.equal(outside.isGit, false);
+
+  // Everything below uses its own checkout so `repo` — shared by dozens of
+  // cases — keeps its pristine working tree.
+  const probeRepo = join(scratch, 'detect-probe');
+  const probeWorktree = join(scratch, 'detect-probe-worktree');
+  const probeBare = join(scratch, 'detect-probe-bare.git');
+  mkdirSync(probeRepo);
+  try {
+    gitInit(probeRepo, '-b', 'main');
+    git(probeRepo, 'config', 'user.email', 'test@dsh.local');
+    git(probeRepo, 'config', 'user.name', 'DSH Test');
+    writeFileSync(join(probeRepo, 'tracked.txt'), 'probe\n');
+    git(probeRepo, 'add', '-A');
+    git(probeRepo, 'commit', '-m', 'probe');
+
+    // A subdirectory resolves to the repository, not to itself: the three paths
+    // must be the ones the parent answers.
+    const subdirectory = join(probeRepo, 'sub-dir');
+    mkdirSync(subdirectory);
+    const fromSubdirectory = await detectRepo(subdirectory);
+    assert.equal(fromSubdirectory.repoRoot, probeRepo, 'a subdirectory reports the enclosing repository');
+    assert.equal(fromSubdirectory.gitDir, join(probeRepo, '.git'));
+    assert.equal(fromSubdirectory.gitCommonDir, fromSubdirectory.gitDir);
+    assert.equal(fromSubdirectory.isLinkedWorktree, false);
+
+    // A `.git` *file* (a linked worktree's pointer) must separate the worktree's
+    // own Git directory from the shared common directory — that split is what
+    // `isLinkedWorktree` and `mainRepoRoot` are derived from.
+    git(probeRepo, 'worktree', 'add', '--detach', probeWorktree);
+    try {
+      const linked = await detectRepo(probeWorktree);
+      assert.equal(linked.isGit, true);
+      assert.equal(linked.repoRoot, probeWorktree);
+      assert.equal(linked.isLinkedWorktree, true, 'a linked worktree is recognised from one command');
+      assert.notEqual(linked.gitDir, linked.gitCommonDir);
+      assert.equal(linked.mainRepoRoot, probeRepo);
+      const linkedSubdirectory = join(probeWorktree, 'linked-sub');
+      mkdirSync(linkedSubdirectory);
+      const fromLinkedSubdirectory = await detectRepo(linkedSubdirectory);
+      assert.equal(fromLinkedSubdirectory.repoRoot, probeWorktree);
+      assert.equal(fromLinkedSubdirectory.mainRepoRoot, probeRepo);
+      assert.equal(fromLinkedSubdirectory.isLinkedWorktree, true);
+    } finally {
+      git(probeRepo, 'worktree', 'remove', '--force', probeWorktree);
+    }
+
+    // A bare repository is not a work tree: same answer as before the merge, and
+    // the fail-closed direction for every caller that needs a working tree.
+    mkdirSync(probeBare);
+    gitInit(probeBare, '--bare');
+    assert.deepEqual(await detectRepo(probeBare), { isGit: false });
+    rmSync(probeBare, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } finally {
+    rmSync(probeRepo, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 });
 
 await test('branches + default branch', async () => {
@@ -365,6 +423,48 @@ await test('snapshotsFast answers without waiting and names what it scheduled', 
   } finally {
     await hub.dispose();
     rmSync(fastRepo, { recursive: true, force: true });
+  }
+});
+
+await test('a never-wait wave is background-class; an awaited read is foreground-class', async () => {
+  // The classification the lane acts on, observed where it must be decided: at
+  // the authorizations. A wave nobody is waiting on must never start in front of
+  // a click, and a click must never queue behind the wave (ADR 0018). Both
+  // halves fail if `snapshotFor` keeps the old `background = true` default, or
+  // if the wave forgets to ask for the background class.
+  const authorizer = createWorkspaceAuthorizer({ workspaceRoots: () => [repo] });
+  const lanes = [];
+  const hub = createGitStateHub({
+    authorizeTarget: async (cwd) => {
+      lanes.push(currentGitLane());
+      return authorizer.authorize(cwd);
+    },
+  });
+  const waitForSnapshot = async (cwd, budgetMs) => {
+    const deadline = Date.now() + budgetMs;
+    while (!hub.peek(cwd) && Date.now() < deadline) await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    return hub.peek(cwd);
+  };
+  try {
+    const batch = await hub.snapshotsFast([repo]);
+    assert.deepEqual(batch.pending, [repo], 'the unseen cwd is scheduled, not computed inline');
+    assert.ok(await waitForSnapshot(repo, 120000), 'the wave filled the cache');
+    assert.ok(lanes.length > 0, 'the wave authorized the target at least once');
+    assert.deepEqual(lanes, lanes.map(() => 'background'),
+      'every authorization of the wave runs in the background lane');
+
+    lanes.length = 0;
+    await hub.snapshotFor(repo, { fresh: true });
+    assert.ok(lanes.length > 0, 'the awaited read authorized too');
+    assert.deepEqual(lanes, lanes.map(() => 'foreground'),
+      'an awaited read authorizes in the foreground lane, so it cannot queue behind the wave');
+
+    lanes.length = 0;
+    await hub.snapshotFor(repo);
+    assert.deepEqual(lanes, lanes.map(() => 'foreground'),
+      'the default is the awaited class, not the wave class');
+  } finally {
+    await hub.dispose();
   }
 });
 
@@ -2420,8 +2520,15 @@ await test('api serializes same-repo worktree creation and actions', async () =>
 await test('api routes over real HTTP', async () => {
   const hub = createGitStateHub({ onChange: () => {} });
   let exchangeRace = null;
+  // `workspaceRoots` is called from inside `authorize()`, i.e. inside whatever
+  // lane class the route chose. Recording here is how the two `/snapshots`
+  // shapes are proved to classify their authorizations differently.
+  const authorizedRootCalls = [];
   const api = createApi(hub, {
-    workspaceRoots: () => [repo, scratch],
+    workspaceRoots: () => {
+      authorizedRootCalls.push(currentGitLane());
+      return [repo, scratch];
+    },
     worktreeWorkspaces: async () => [{ workspaceId: 'ws-provider-x', path: '/tmp/provider-x' }],
     beforeFileExchange: async (target) => exchangeRace?.(target),
   });
@@ -2530,8 +2637,11 @@ await test('api routes over real HTTP', async () => {
     const snap = await get(`/snapshot?cwd=${encodeURIComponent(wt1.path)}`);
     assert.equal(snap.snapshot.branch, 'feature-x');
 
+    authorizedRootCalls.length = 0;
     const batch = await post('/snapshots', { cwds: [wt1.path, repo, scratch] });
-    assert.equal(batch.byCwd[wt1.path].isGit, true, 'a warm cwd is answered immediately');
+    assert.ok(authorizedRootCalls.length > 0, 'the batch authorized its selectors');
+    assert.deepEqual(authorizedRootCalls, authorizedRootCalls.map(() => 'background'),
+      'the never-wait batch authorizes in the background lane, so a click cannot queue behind it');
     // Everything not computed yet is *named* rather than awaited: the batch
     // answers without waiting for a compute (ADR 0018).
     const pendingSet = new Set(batch.pending);
@@ -2541,10 +2651,13 @@ await test('api routes over real HTTP', async () => {
     }
     // `fresh` is the explicit "wait for it" shape, and it still answers a non-git
     // workspace with isGit:false rather than pending.
+    authorizedRootCalls.length = 0;
     const awaited = await post('/snapshots', { cwds: [repo, scratch], fresh: true });
     assert.equal(awaited.byCwd[repo].isGit, true);
     assert.equal(awaited.byCwd[scratch].isGit, false);
     assert.deepEqual(awaited.pending, [], 'a fresh batch has nothing pending');
+    assert.deepEqual(authorizedRootCalls, authorizedRootCalls.map(() => 'foreground'),
+      'the awaited refresh authorizes in the foreground lane');
 
     writeFileSync(join(wt1.path, 'http.txt'), 'via http\n');
     const diff = await get(`/diff?cwd=${encodeURIComponent(wt1.path)}&mode=uncommitted`);
