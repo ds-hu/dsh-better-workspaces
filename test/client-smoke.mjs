@@ -890,9 +890,42 @@ assert.equal(T.liveDetect({ cwd: '/a', value: detectValue }, '/b'), null, 'a det
 assert.equal(T.liveDetect({ cwd: '/a', value: detectValue }, null), null, 'no cwd → no detection');
 assert.equal(T.liveDetect({ cwd: null, value: detectValue }, '/a'), null, 'untagged detection is unusable');
 
+/* ---------------- snapshot poll coalescing ---------------- */
+/* One batch in flight, at most one queued rerun, and a workspace tracked while
+   a batch is in flight is still asked for afterwards — the old feed returned
+   early while polling and dropped exactly that cwd. */
+const settle = (ms = 30) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
+{
+  const sends = [];
+  const scheduler = T.createPollScheduler({
+    delayMs: 15,
+    send: () => new Promise((resolveSend) => { sends.push(resolveSend); }),
+  });
+  for (let i = 0; i < 5; i += 1) scheduler.touch();
+  await settle(60);
+  assert.equal(sends.length, 1, 'five tracked workspaces coalesce into one batch');
+  scheduler.touch();
+  scheduler.touch();
+  await settle(60);
+  assert.equal(sends.length, 1, 'a batch already in flight is not duplicated');
+  sends[0]();
+  await settle(60);
+  assert.equal(sends.length, 2, 'the cwd tracked during that flight is asked for afterwards');
+  sends[1]();
+  await settle(60);
+  assert.equal(sends.length, 2, 'the queue drains to empty');
+  scheduler.touch();
+  await settle(60);
+  assert.equal(sends.length, 3, 'a later track starts a new batch');
+  scheduler.dispose();
+  sends[2]();
+  scheduler.touch();
+  await settle(60);
+  assert.equal(sends.length, 3, 'a disposed scheduler never sends again');
+}
+
 /* ---------------- request ownership + draft handoff transactions ---------------- */
-const requestOwner = T.createRequestOwner();
-const firstRead = requestOwner.begin('read');
+const requestOwner = T.createRequestOwner();const firstRead = requestOwner.begin('read');
 const unrelated = requestOwner.begin('save');
 const latestRead = requestOwner.begin('read');
 assert.equal(requestOwner.owns(firstRead), false, 'new same-domain request supersedes the prior one');
