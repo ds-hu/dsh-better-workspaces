@@ -62,14 +62,22 @@ const nested = join(repo, 'nested-workspace');
 mkdirSync(nested);
 
 let roots = [repo, nested, plain];
+// Both batch entry points are counted through one counter: the route answers
+// from `snapshotsFast` by default, so a guard that only watched `snapshots`
+// would pass no matter what the route did (ADR 0018).
 let snapshotsCalls = 0;
+const snapshotOf = (cwd) => ({ cwd, isGit: existsSync(join(cwd, '.git')) });
 const hub = {
   async snapshotFor(cwd) {
-    return { cwd, isGit: existsSync(join(cwd, '.git')) };
+    return snapshotOf(cwd);
   },
   async snapshots(cwds) {
     snapshotsCalls += 1;
-    return Object.fromEntries(cwds.map((cwd) => [cwd, { cwd, isGit: existsSync(join(cwd, '.git')) }]));
+    return Object.fromEntries(cwds.map((cwd) => [cwd, snapshotOf(cwd)]));
+  },
+  async snapshotsFast(cwds) {
+    snapshotsCalls += 1;
+    return { byCwd: Object.fromEntries(cwds.map((cwd) => [cwd, snapshotOf(cwd)])), pending: [] };
   },
   async invalidate() {},
   subscribe() {
@@ -153,7 +161,7 @@ try {
   snapshotsCalls = 0;
   const atomic = await request('/snapshots', jsonInit({ cwds: [repo, outside] }));
   assert.equal(atomic.status, 403);
-  assert.equal(snapshotsCalls, 0, 'an invalid batch must not call hub.snapshots');
+  assert.equal(snapshotsCalls, 0, 'an invalid batch must not reach the snapshot hub at all');
   assert.equal(readFileSync(join(outside, 'tracked.txt'), 'utf8'), 'one\n');
 
   for (const selector of ['relative/path', join(sandbox, 'missing')]) {
@@ -350,7 +358,10 @@ try {
     method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: '[]',
   })).status, 400);
   assert.equal((await request('/snapshots', jsonInit({ padding: 'x'.repeat(1024 * 1024 + 1) }))).status, 413);
-  assert.equal((await request('/snapshots', jsonInit({ cwds: [repo, plain] }))).status, 200);
+  assert.equal((await request('/snapshots', jsonInit({ cwds: [repo, plain], fresh: 'yes' }))).status, 400);
+  const batchShape = await request('/snapshots', jsonInit({ cwds: [repo, plain] }));
+  assert.equal(batchShape.status, 200);
+  assert.ok(Array.isArray(batchShape.body.pending), 'a batch names what it did not answer yet');
   assert.equal((await request('/action', jsonInit({ cwd: repo, name: 'commit', params: {} }))).status, 422);
   assert.equal((await request('/action', jsonInit({ cwd: repo, name: 'fetch' }))).status, 502);
   assert.equal((await request('/worktrees/archive', jsonInit({ path: repo, force: true }))).status, 403);
@@ -576,6 +587,25 @@ try {
     assert.equal(readFileSync(nestedFile, 'utf8'), 'before\n');
     assert.equal(readdirSync(nested).some((name) => name.startsWith('.bw-') && name.endsWith('.tmp')), false);
   }
+
+  // A tombstone listing is a READ and must not queue behind the repository's
+  // write gate (ADR 0011 serializes mutations, not reads). With the gate held
+  // by this test, the route still answers; before the fix it blocked until the
+  // holder released it, which is the 1.2-minute `/worktrees/deferred` on a busy
+  // host. The old shape would time out here.
+  const releaseForRead = await hostMutationCoordinator.acquire(gitFamilyKey);
+  let readEnteredGate = false;
+  observeMutation = (key) => {
+    if (key === gitFamilyKey) readEnteredGate = true;
+  };
+  const deferredRead = await Promise.race([
+    request(`/worktrees/deferred?cwd=${encodeURIComponent(repo)}`),
+    new Promise((resolveLate) => setTimeout(() => resolveLate({ status: 'timeout' }), 5000)),
+  ]);
+  observeMutation = null;
+  releaseForRead();
+  assert.notEqual(deferredRead.status, 'timeout', 'the deferred listing must answer while a mutation holds the gate');
+  assert.equal(readEnteredGate, false, 'a read never enters the repository write gate');
 
   // Authorization is captured before queueing, then re-proven after the outer
   // workspace gate. Reusing the same lexical root with a new inode must not let

@@ -25,7 +25,9 @@ const scratch = mkdtempSync(join(scratchRoot, 'dsh-bw-test-'));
 process.env.DSH_HOME = join(scratch, 'dshhome');
 mkdirSync(process.env.DSH_HOME, { recursive: true });
 
-const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, listCommits, unpushedShas } = await import('../lib/git.js');
+const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, withBackgroundGitLane, currentGitLane, statusProbe, currentBranchInfo, listCommits, unpushedShas } = await import('../lib/git.js');
+const { createLane } = await import('../lib/lane.js');
+const { detectRepoCached, resetDiscoveryCache, setDiscoveryClock } = await import('../lib/discovery.js');
 const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../lib/worktree.js');
 const { computeDiff, commitDiff } = await import('../lib/diff.js');
 const { commitAction, pullAction, pushAction, discardAction, updateFromBaseAction, createPrAction, buildActionLadder } = await import('../lib/actions.js');
@@ -138,13 +140,71 @@ git(repo, 'add', '-A');
 git(repo, 'commit', '-m', 'initial');
 git(repo, 'branch', 'feature');
 
-await test('detectRepo', async () => {
-  const d = await detectRepo(repo);
-  assert.equal(d.isGit, true);
-  assert.equal(d.repoRoot, repo);
-  assert.equal(d.isLinkedWorktree, false);
+await test('detectRepo: one rev-parse answers root, subdirectory, worktree, bare and non-repo', async () => {
+  const root = await detectRepo(repo);
+  assert.equal(root.isGit, true);
+  assert.equal(root.repoRoot, repo);
+  assert.equal(root.gitDir, join(repo, '.git'));
+  assert.equal(root.gitCommonDir, root.gitDir, 'a main checkout has a single Git directory');
+  assert.equal(root.isLinkedWorktree, false);
+  assert.equal(root.mainRepoRoot, repo);
   const outside = await detectRepo(scratch);
   assert.equal(outside.isGit, false);
+
+  // Everything below uses its own checkout so `repo` — shared by dozens of
+  // cases — keeps its pristine working tree.
+  const probeRepo = join(scratch, 'detect-probe');
+  const probeWorktree = join(scratch, 'detect-probe-worktree');
+  const probeBare = join(scratch, 'detect-probe-bare.git');
+  mkdirSync(probeRepo);
+  try {
+    gitInit(probeRepo, '-b', 'main');
+    git(probeRepo, 'config', 'user.email', 'test@dsh.local');
+    git(probeRepo, 'config', 'user.name', 'DSH Test');
+    writeFileSync(join(probeRepo, 'tracked.txt'), 'probe\n');
+    git(probeRepo, 'add', '-A');
+    git(probeRepo, 'commit', '-m', 'probe');
+
+    // A subdirectory resolves to the repository, not to itself: the three paths
+    // must be the ones the parent answers.
+    const subdirectory = join(probeRepo, 'sub-dir');
+    mkdirSync(subdirectory);
+    const fromSubdirectory = await detectRepo(subdirectory);
+    assert.equal(fromSubdirectory.repoRoot, probeRepo, 'a subdirectory reports the enclosing repository');
+    assert.equal(fromSubdirectory.gitDir, join(probeRepo, '.git'));
+    assert.equal(fromSubdirectory.gitCommonDir, fromSubdirectory.gitDir);
+    assert.equal(fromSubdirectory.isLinkedWorktree, false);
+
+    // A `.git` *file* (a linked worktree's pointer) must separate the worktree's
+    // own Git directory from the shared common directory — that split is what
+    // `isLinkedWorktree` and `mainRepoRoot` are derived from.
+    git(probeRepo, 'worktree', 'add', '--detach', probeWorktree);
+    try {
+      const linked = await detectRepo(probeWorktree);
+      assert.equal(linked.isGit, true);
+      assert.equal(linked.repoRoot, probeWorktree);
+      assert.equal(linked.isLinkedWorktree, true, 'a linked worktree is recognised from one command');
+      assert.notEqual(linked.gitDir, linked.gitCommonDir);
+      assert.equal(linked.mainRepoRoot, probeRepo);
+      const linkedSubdirectory = join(probeWorktree, 'linked-sub');
+      mkdirSync(linkedSubdirectory);
+      const fromLinkedSubdirectory = await detectRepo(linkedSubdirectory);
+      assert.equal(fromLinkedSubdirectory.repoRoot, probeWorktree);
+      assert.equal(fromLinkedSubdirectory.mainRepoRoot, probeRepo);
+      assert.equal(fromLinkedSubdirectory.isLinkedWorktree, true);
+    } finally {
+      git(probeRepo, 'worktree', 'remove', '--force', probeWorktree);
+    }
+
+    // A bare repository is not a work tree: same answer as before the merge, and
+    // the fail-closed direction for every caller that needs a working tree.
+    mkdirSync(probeBare);
+    gitInit(probeBare, '--bare');
+    assert.deepEqual(await detectRepo(probeBare), { isGit: false });
+    rmSync(probeBare, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } finally {
+    rmSync(probeRepo, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 });
 
 await test('branches + default branch', async () => {
@@ -153,6 +213,302 @@ await test('branches + default branch', async () => {
   const names = branches.map((b) => b.name).sort();
   assert.deepEqual(names, ['feature', 'main']);
   assert.equal(branches.every((b) => b.hasLocal), true);
+});
+
+await test('discovery cache: repeats are cached, a replaced directory is not', async () => {
+  resetDiscoveryCache();
+  const first = await detectRepoCached(repo);
+  const second = await detectRepoCached(repo);
+  // Same object reference: the second call did not spawn Git at all. A cache
+  // that silently missed would return a fresh object here.
+  assert.equal(second, first, 'the second call is served from the cache');
+  const freshRun = await detectRepoCached(repo, { fresh: true });
+  assert.notEqual(freshRun, first, 'a mutation path always re-discovers');
+  assert.deepEqual(freshRun, first, 'and it discovers the same repository');
+
+  // The key carries dev/ino, so the same spelling with a DIFFERENT directory
+  // behind it is a miss. Both directories exist at the same time here, which is
+  // what makes the inodes distinct by construction: deleting and re-creating a
+  // directory can be handed the same inode back (ext4 does), and that residual
+  // window is documented in lib/discovery.js rather than asserted away.
+  const target = join(scratch, 'reused-path');
+  const original = join(scratch, 'reused-original');
+  const replacement = join(scratch, 'reused-replacement');
+  mkdirSync(replacement); // created first, so its inode cannot be the repo's
+  mkdirSync(original);
+  gitInit(original, '-b', 'main');
+  renameSync(original, target);
+  assert.equal((await detectRepoCached(target)).isGit, true, 'the repository is discovered');
+  renameSync(target, original);
+  renameSync(replacement, target);
+  const afterSwap = await detectRepoCached(target);
+  assert.equal(afterSwap.isGit, false, 'a different directory at the same spelling must not hit the old entry');
+  for (const path of [target, original]) rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  resetDiscoveryCache();
+});
+
+await test('discovery cache: an entry expires after its TTL', async () => {
+  resetDiscoveryCache();
+  let clock = 1000;
+  setDiscoveryClock(() => clock);
+  try {
+    const first = await detectRepoCached(repo);
+    clock = 1000 + 29999;
+    assert.equal(await detectRepoCached(repo), first, 'inside the TTL the entry is reused');
+    clock = 1000 + 30001;
+    assert.notEqual(await detectRepoCached(repo), first, 'past the TTL it is re-discovered');
+  } finally {
+    setDiscoveryClock(null);
+    resetDiscoveryCache();
+  }
+});
+
+await test('authorize: the write path bypasses the discovery cache', async () => {
+  resetDiscoveryCache();
+  const authorizer = createWorkspaceAuthorizer({ workspaceRoots: () => [repo] });
+  const readAuth = await authorizer.authorize(repo);
+  assert.equal(readAuth.ok, true);
+  assert.equal(readAuth.gitBoundary, 'root');
+  assert.equal(readAuth.kind, 'workspace');
+  const writeAuth = await authorizer.authorize(repo, { fresh: true });
+  assert.equal(writeAuth.ok, true);
+  // Both tiers must agree about the identity facts; only the discovery shortcut
+  // differs, and it never carries dev/ino.
+  assert.deepEqual(writeAuth.identity, readAuth.identity);
+  assert.deepEqual(writeAuth.gitDir, readAuth.gitDir);
+  assert.deepEqual(writeAuth.gitCommonDir, readAuth.gitCommonDir);
+  const outsider = createWorkspaceAuthorizer({ workspaceRoots: () => [repo] });
+  assert.equal((await outsider.authorize(scratch, { fresh: true })).ok, false);
+  resetDiscoveryCache();
+});
+
+await test('statusProbe matches the narrow probes it replaces', async () => {
+  const probeRepo = join(scratch, 'probe-repo');
+  mkdirSync(probeRepo);
+  gitInit(probeRepo, '-b', 'main');
+  git(probeRepo, 'config', 'user.email', 'test@dsh.local');
+  git(probeRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(probeRepo, 'a.txt'), 'alpha\n');
+  writeFileSync(join(probeRepo, 'b.txt'), 'b\n');
+  git(probeRepo, 'add', '-A');
+  git(probeRepo, 'commit', '-m', 'initial');
+  const compare = async (label) => {
+    const probe = await statusProbe(probeRepo);
+    const [branchInfo, status] = await Promise.all([currentBranchInfo(probeRepo), porcelainStatus(probeRepo)]);
+    assert.ok(probe, `${label}: the merged probe answered`);
+    assert.equal(probe.branch, branchInfo.branch, `${label}: branch`);
+    assert.equal(probe.detached, Boolean(branchInfo.detached), `${label}: detached`);
+    assert.equal(probe.detachedShort, branchInfo.detachedShort ?? null, `${label}: detachedShort`);
+    assert.equal(probe.sha, branchInfo.sha, `${label}: sha`);
+    assert.equal(probe.unborn, Boolean(branchInfo.unborn), `${label}: unborn`);
+    assert.equal(probe.dirty, status.dirty, `${label}: dirty`);
+    // Entry order is Git's own; compare the multiset so a serializer difference
+    // cannot masquerade as a semantic one.
+    const flatten = (entries) => entries
+      .map((entry) => `${entry.code} ${entry.path}${entry.oldPath ? ` <- ${entry.oldPath}` : ''}`)
+      .sort();
+    assert.deepEqual(flatten(probe.entries), flatten(status.entries), `${label}: entries`);
+    return probe;
+  };
+  try {
+    await compare('clean');
+    writeFileSync(join(probeRepo, 'new.txt'), 'new\n');
+    await compare('untracked');
+    writeFileSync(join(probeRepo, 'a.txt'), 'alpha\nchanged\n');
+    await compare('modified');
+    git(probeRepo, 'add', 'a.txt');
+    await compare('staged');
+    git(probeRepo, 'mv', 'b.txt', 'renamed.txt');
+    const renamed = await compare('renamed');
+    const renameEntry = renamed.entries.find((entry) => entry.code.startsWith('R'));
+    assert.ok(renameEntry, 'the rename is reported as a rename');
+    assert.equal(renameEntry.path, 'renamed.txt');
+    assert.equal(renameEntry.oldPath, 'b.txt', 'the pre-rename path is parsed from its own -z record');
+    git(probeRepo, 'checkout', '--detach');
+    await compare('detached');
+    git(probeRepo, 'checkout', 'main');
+  } finally {
+    rmSync(probeRepo, { recursive: true, force: true });
+  }
+
+  const unbornRepo = join(scratch, 'probe-unborn');
+  mkdirSync(unbornRepo);
+  try {
+    gitInit(unbornRepo, '-b', 'main');
+    const probe = await statusProbe(unbornRepo);
+    const branchInfo = await currentBranchInfo(unbornRepo);
+    assert.ok(probe);
+    assert.equal(probe.unborn, true);
+    assert.equal(probe.sha, null);
+    assert.equal(probe.branch, branchInfo.branch);
+  } finally {
+    rmSync(unbornRepo, { recursive: true, force: true });
+  }
+});
+
+await test('hub repository facts are reused inside their TTL and dropped by invalidate', async () => {
+  const factsRepo = join(scratch, 'facts-repo');
+  mkdirSync(factsRepo);
+  gitInit(factsRepo, '-b', 'main');
+  git(factsRepo, 'config', 'user.email', 'test@dsh.local');
+  git(factsRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(factsRepo, 'a.txt'), 'alpha\n');
+  git(factsRepo, 'add', '-A');
+  git(factsRepo, 'commit', '-m', 'initial');
+  const hub = createGitStateHub({});
+  try {
+    const first = await hub.snapshotFor(factsRepo, { fresh: true });
+    assert.equal(first.isGit, true);
+    assert.equal(first.defaultBranch, 'main');
+    assert.ok(hub.stats().facts > 0, 'the compute cached repository facts');
+    const factsAfterFirst = hub.stats().facts;
+    await hub.snapshotFor(factsRepo, { fresh: true });
+    assert.equal(hub.stats().facts, factsAfterFirst, 'a second compute reuses the same fact keys');
+    // The default branch can move. Inside the TTL the fact is served from the
+    // cache — that staleness is the trade-off — and `invalidate()` is what
+    // proves the cache can be dropped. Without the drop this stays 'main'.
+    git(factsRepo, 'branch', '-m', 'main', 'trunk');
+    const stale = await hub.snapshotFor(factsRepo, { fresh: true });
+    assert.equal(stale.defaultBranch, 'main', 'the fact is reused inside its TTL');
+    const refreshed = await hub.invalidate(factsRepo);
+    assert.equal(refreshed.defaultBranch, 'trunk', 'invalidate drops the cached fact');
+  } finally {
+    await hub.dispose();
+    rmSync(factsRepo, { recursive: true, force: true });
+  }
+});
+
+await test('snapshotsFast answers without waiting and names what it scheduled', async () => {
+  const fastRepo = join(scratch, 'fast-repo');
+  mkdirSync(fastRepo);
+  gitInit(fastRepo, '-b', 'main');
+  git(fastRepo, 'config', 'user.email', 'test@dsh.local');
+  git(fastRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(fastRepo, 'a.txt'), 'alpha\n');
+  git(fastRepo, 'add', '-A');
+  git(fastRepo, 'commit', '-m', 'initial');
+  const hub = createGitStateHub({});
+  const waitForSnapshot = async (cwd, budgetMs) => {
+    const deadline = Date.now() + budgetMs;
+    while (!hub.peek(cwd) && Date.now() < deadline) await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    return hub.peek(cwd);
+  };
+  try {
+    const startedAt = Date.now();
+    const first = await hub.snapshotsFast([fastRepo]);
+    const elapsed = Date.now() - startedAt;
+    // An unseen workspace must not make the batch wait for a compute; on a cold
+    // 20-workspace host that wait was the whole page load.
+    assert.ok(elapsed < 1500, `the batch answered immediately (took ${elapsed} ms)`);
+    assert.deepEqual(first.byCwd, {}, 'nothing is known yet');
+    assert.deepEqual(first.pending, [fastRepo], 'the unseen cwd is named, not computed inline');
+    const filled = await waitForSnapshot(fastRepo, 120000);
+    assert.ok(filled, 'the scheduled compute filled the cache');
+    assert.equal(filled.isGit, true);
+    const second = await hub.snapshotsFast([fastRepo]);
+    assert.deepEqual(second.pending, [], 'a warmed cwd is answered from the cache');
+    assert.equal(second.byCwd[fastRepo].branch, 'main');
+    // A non-git path is not "pending" forever: once the negative cache knows it,
+    // it is answered with isGit:false (the client needs that to stop retrying).
+    await hub.snapshotsFast([scratch]);
+    const negativeDeadline = Date.now() + 30000;
+    let negative;
+    while (Date.now() < negativeDeadline) {
+      negative = await hub.snapshotsFast([scratch]);
+      if (Object.hasOwn(negative.byCwd, scratch)) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    }
+    assert.equal(Object.hasOwn(negative.byCwd, scratch), true, 'the negative answer is cached and returned');
+    assert.equal(negative.byCwd[scratch].isGit, false);
+  } finally {
+    await hub.dispose();
+    rmSync(fastRepo, { recursive: true, force: true });
+  }
+});
+
+await test('a never-wait wave is background-class; an awaited read is foreground-class', async () => {
+  // The classification the lane acts on, observed where it must be decided: at
+  // the authorizations. A wave nobody is waiting on must never start in front of
+  // a click, and a click must never queue behind the wave (ADR 0018). Both
+  // halves fail if `snapshotFor` keeps the old `background = true` default, or
+  // if the wave forgets to ask for the background class.
+  const authorizer = createWorkspaceAuthorizer({ workspaceRoots: () => [repo] });
+  const lanes = [];
+  const hub = createGitStateHub({
+    authorizeTarget: async (cwd) => {
+      lanes.push(currentGitLane());
+      return authorizer.authorize(cwd);
+    },
+  });
+  const waitForSnapshot = async (cwd, budgetMs) => {
+    const deadline = Date.now() + budgetMs;
+    while (!hub.peek(cwd) && Date.now() < deadline) await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    return hub.peek(cwd);
+  };
+  try {
+    const batch = await hub.snapshotsFast([repo]);
+    assert.deepEqual(batch.pending, [repo], 'the unseen cwd is scheduled, not computed inline');
+    assert.ok(await waitForSnapshot(repo, 120000), 'the wave filled the cache');
+    assert.ok(lanes.length > 0, 'the wave authorized the target at least once');
+    assert.deepEqual(lanes, lanes.map(() => 'background'),
+      'every authorization of the wave runs in the background lane');
+
+    lanes.length = 0;
+    await hub.snapshotFor(repo, { fresh: true });
+    assert.ok(lanes.length > 0, 'the awaited read authorized too');
+    assert.deepEqual(lanes, lanes.map(() => 'foreground'),
+      'an awaited read authorizes in the foreground lane, so it cannot queue behind the wave');
+
+    lanes.length = 0;
+    await hub.snapshotFor(repo);
+    assert.deepEqual(lanes, lanes.map(() => 'foreground'),
+      'the default is the awaited class, not the wave class');
+  } finally {
+    await hub.dispose();
+  }
+});
+
+await test('hub invalidateFamily recomputes one repository family and leaves the rest alone', async () => {
+  const famRepo = join(scratch, 'family-repo');
+  const famWt = join(scratch, 'family-worktree');
+  const otherRepo = join(scratch, 'other-repo');
+  for (const path of [famRepo, otherRepo]) {
+    mkdirSync(path);
+    gitInit(path, '-b', 'main');
+    git(path, 'config', 'user.email', 'test@dsh.local');
+    git(path, 'config', 'user.name', 'DSH Test');
+    writeFileSync(join(path, 'a.txt'), 'alpha\n');
+    git(path, 'add', '-A');
+    git(path, 'commit', '-m', 'initial');
+  }
+  git(famRepo, 'worktree', 'add', '-b', 'family-branch', famWt, 'main');
+  const hub = createGitStateHub({});
+  const waitForSnapshot = async (cwd) => {
+    const deadline = Date.now() + 120000;
+    while (!hub.peek(cwd) && Date.now() < deadline) await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    return hub.peek(cwd);
+  };
+  try {
+    for (const cwd of [famRepo, famWt, otherRepo]) {
+      await hub.snapshotFor(cwd);
+      assert.ok(await waitForSnapshot(cwd), `${cwd} computed`);
+    }
+    // The two checkouts of famRepo share a main root; otherRepo does not.
+    assert.equal(await hub.invalidateFamily(famRepo), 2, 'the family — main checkout and its worktree — is scheduled');
+    assert.equal(await hub.invalidateFamily(otherRepo), 1, 'a different repository is its own family');
+    assert.equal(await hub.invalidateFamily(join(scratch, 'not-a-repo-or-tracked')), 0, 'an unknown cwd schedules nothing');
+    // The minute sweep is capped so it can never become a full refresh wave.
+    assert.equal(hub.sweepNow(), 3, 'the sweep covers at most its cap of targets');
+  } finally {
+    await hub.dispose().catch(() => {});
+    // Unregister the linked worktree before deleting directories, then retry:
+    // a watcher or antivirus scanner can still hold the directory for a moment,
+    // and a cleanup hiccup must not mask a real assertion from the body.
+    try { git(famRepo, 'worktree', 'remove', '--force', famWt); } catch { /* best effort */ }
+    for (const path of [famWt, famRepo, otherRepo]) {
+      try { rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* scratch tree */ }
+    }
+  }
 });
 
 await test('runGit accepted exits never hide process failures', async () => {
@@ -199,6 +555,68 @@ await test('runGit limiter preserves each caller pinned environment', async () =
   // separator, so compare through the platform normalizer (ADR 0013), not ===.
   assert.equal(normalizeGitPath(result.stdout.trim()), normalizeGitPath(repo));
   await Promise.all(blockers);
+});
+
+await test('lane: a foreground call never waits behind queued background work', async () => {
+  const lane = createLane({ capacity: 1 });
+  const order = [];
+  let releaseFirst;
+  const gate = new Promise((resolveGate) => { releaseFirst = resolveGate; });
+  const first = lane.run(async () => { order.push('first'); await gate; });
+  const background = lane.run(async () => { order.push('background'); }, { background: true });
+  const foreground = lane.run(async () => { order.push('foreground'); });
+  releaseFirst();
+  await Promise.all([first, background, foreground]);
+  // The background task was queued first and still runs last: that is the whole
+  // point of the class split. If the lane ignored it, this would be
+  // [first, background, foreground].
+  assert.deepEqual(order, ['first', 'foreground', 'background']);
+});
+
+await test('lane: background uses the whole capacity on an idle host', async () => {
+  const lane = createLane({ capacity: 2 });
+  let peak = 0;
+  let active = 0;
+  const task = () => lane.run(async () => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    active -= 1;
+  }, { background: true });
+  await Promise.all([task(), task(), task(), task()]);
+  assert.equal(peak, 2, 'background fills the lane when nothing is queued ahead of it');
+  assert.deepEqual(lane.stats(), { active: 0, foreground: 0, background: 0 });
+});
+
+await test('lane: a long-waiting background task is promoted instead of starved', async () => {
+  let clock = 0;
+  const lane = createLane({ capacity: 1, promoteAfterMs: 1000, now: () => clock });
+  const order = [];
+  let releaseFirst;
+  const gate = new Promise((resolveGate) => { releaseFirst = resolveGate; });
+  const first = lane.run(async () => { order.push('first'); await gate; });
+  // The foreground task queues FIRST, so plain FIFO would run it first. Only
+  // promotion may put the background task ahead of it.
+  const foreground = lane.run(async () => { order.push('foreground'); });
+  clock = 500;
+  const background = lane.run(async () => { order.push('background'); }, { background: true });
+  clock = 1500; // the background task has now waited its full budget
+  releaseFirst();
+  await Promise.all([first, background, foreground]);
+  assert.deepEqual(order, ['first', 'background', 'foreground'],
+    'promotion outranks a foreground task that was queued earlier');
+});
+
+await test('git: the background lane scope survives nested awaits', async () => {
+  assert.equal(currentGitLane(), 'foreground');
+  const observed = await withBackgroundGitLane(async () => {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1));
+    const nested = await runGit(['rev-parse', '--verify', 'HEAD'], { cwd: repo });
+    assert.equal(nested.ok, true, nested.stderr);
+    return currentGitLane();
+  });
+  assert.equal(observed, 'background');
+  assert.equal(currentGitLane(), 'foreground', 'the scope is restored on exit');
 });
 
 await test('parent-guarded Git cannot outlive a killed Host worker', async () => {
@@ -266,6 +684,11 @@ await test('broken HEAD is not misclassified as unborn', async () => {
   git(broken, 'commit', '-m', 'initial');
   writeFileSync(join(broken, '.git', 'refs', 'heads', 'main'), 'bad\n');
   writeFileSync(join(broken, 'untracked.txt'), 'must not look like a new repository\n');
+  // The merged probe must refuse to answer here. `git status --branch` exits 0
+  // on a corrupted ref, printing `# branch.oid (initial)` and
+  // `# branch.head (unknown)` — reading that as "unborn" is precisely the
+  // misclassification this case exists to prevent.
+  assert.equal(await statusProbe(broken), null, 'a corrupted HEAD is not a probe answer');
   const stat = await diffStat(broken, null);
   assert.equal(stat.ok, false);
   assert.equal(stat.additions, null);
@@ -2097,8 +2520,15 @@ await test('api serializes same-repo worktree creation and actions', async () =>
 await test('api routes over real HTTP', async () => {
   const hub = createGitStateHub({ onChange: () => {} });
   let exchangeRace = null;
+  // `workspaceRoots` is called from inside `authorize()`, i.e. inside whatever
+  // lane class the route chose. Recording here is how the two `/snapshots`
+  // shapes are proved to classify their authorizations differently.
+  const authorizedRootCalls = [];
   const api = createApi(hub, {
-    workspaceRoots: () => [repo, scratch],
+    workspaceRoots: () => {
+      authorizedRootCalls.push(currentGitLane());
+      return [repo, scratch];
+    },
     worktreeWorkspaces: async () => [{ workspaceId: 'ws-provider-x', path: '/tmp/provider-x' }],
     beforeFileExchange: async (target) => exchangeRace?.(target),
   });
@@ -2207,9 +2637,27 @@ await test('api routes over real HTTP', async () => {
     const snap = await get(`/snapshot?cwd=${encodeURIComponent(wt1.path)}`);
     assert.equal(snap.snapshot.branch, 'feature-x');
 
+    authorizedRootCalls.length = 0;
     const batch = await post('/snapshots', { cwds: [wt1.path, repo, scratch] });
-    assert.equal(batch.byCwd[wt1.path].isGit, true);
-    assert.equal(batch.byCwd[scratch].isGit, false);
+    assert.ok(authorizedRootCalls.length > 0, 'the batch authorized its selectors');
+    assert.deepEqual(authorizedRootCalls, authorizedRootCalls.map(() => 'background'),
+      'the never-wait batch authorizes in the background lane, so a click cannot queue behind it');
+    // Everything not computed yet is *named* rather than awaited: the batch
+    // answers without waiting for a compute (ADR 0018).
+    const pendingSet = new Set(batch.pending);
+    assert.equal(pendingSet.has(wt1.path), false, 'a warmed cwd is never reported pending');
+    for (const cwd of [repo, scratch]) {
+      assert.ok(batch.byCwd[cwd] || pendingSet.has(cwd), `${cwd} is answered or explicitly pending`);
+    }
+    // `fresh` is the explicit "wait for it" shape, and it still answers a non-git
+    // workspace with isGit:false rather than pending.
+    authorizedRootCalls.length = 0;
+    const awaited = await post('/snapshots', { cwds: [repo, scratch], fresh: true });
+    assert.equal(awaited.byCwd[repo].isGit, true);
+    assert.equal(awaited.byCwd[scratch].isGit, false);
+    assert.deepEqual(awaited.pending, [], 'a fresh batch has nothing pending');
+    assert.deepEqual(authorizedRootCalls, authorizedRootCalls.map(() => 'foreground'),
+      'the awaited refresh authorizes in the foreground lane');
 
     writeFileSync(join(wt1.path, 'http.txt'), 'via http\n');
     const diff = await get(`/diff?cwd=${encodeURIComponent(wt1.path)}&mode=uncommitted`);
