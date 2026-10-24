@@ -27,6 +27,7 @@ mkdirSync(process.env.DSH_HOME, { recursive: true });
 
 const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, withBackgroundGitLane, currentGitLane, listCommits, unpushedShas } = await import('../lib/git.js');
 const { createLane } = await import('../lib/lane.js');
+const { detectRepoCached, resetDiscoveryCache, setDiscoveryClock } = await import('../lib/discovery.js');
 const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../lib/worktree.js');
 const { computeDiff, commitDiff } = await import('../lib/diff.js');
 const { commitAction, pullAction, pushAction, discardAction, updateFromBaseAction, createPrAction, buildActionLadder } = await import('../lib/actions.js');
@@ -154,6 +155,67 @@ await test('branches + default branch', async () => {
   const names = branches.map((b) => b.name).sort();
   assert.deepEqual(names, ['feature', 'main']);
   assert.equal(branches.every((b) => b.hasLocal), true);
+});
+
+await test('discovery cache: repeats are cached, identities and re-creations are not', async () => {
+  resetDiscoveryCache();
+  const first = await detectRepoCached(repo);
+  const second = await detectRepoCached(repo);
+  // Same object reference: the second call did not spawn Git at all. A cache
+  // that silently missed would return a fresh object here.
+  assert.equal(second, first, 'the second call is served from the cache');
+  const freshRun = await detectRepoCached(repo, { fresh: true });
+  assert.notEqual(freshRun, first, 'a mutation path always re-discovers');
+  assert.deepEqual(freshRun, first, 'and it discovers the same repository');
+
+  // The key carries dev/ino, so the same spelling with a different directory
+  // behind it is a miss. A path-only cache returns the stale `isGit: true`
+  // after the repository is deleted and a plain directory takes its place.
+  const reused = join(scratch, 'reused-path');
+  mkdirSync(reused);
+  gitInit(reused, '-b', 'main');
+  assert.equal((await detectRepoCached(reused)).isGit, true);
+  rmSync(reused, { recursive: true, force: true });
+  mkdirSync(reused);
+  const afterRecreation = await detectRepoCached(reused);
+  assert.equal(afterRecreation.isGit, false, 'a re-created directory must not hit the old entry');
+  rmSync(reused, { recursive: true, force: true });
+  resetDiscoveryCache();
+});
+
+await test('discovery cache: an entry expires after its TTL', async () => {
+  resetDiscoveryCache();
+  let clock = 1000;
+  setDiscoveryClock(() => clock);
+  try {
+    const first = await detectRepoCached(repo);
+    clock = 1000 + 29999;
+    assert.equal(await detectRepoCached(repo), first, 'inside the TTL the entry is reused');
+    clock = 1000 + 30001;
+    assert.notEqual(await detectRepoCached(repo), first, 'past the TTL it is re-discovered');
+  } finally {
+    setDiscoveryClock(null);
+    resetDiscoveryCache();
+  }
+});
+
+await test('authorize: the write path bypasses the discovery cache', async () => {
+  resetDiscoveryCache();
+  const authorizer = createWorkspaceAuthorizer({ workspaceRoots: () => [repo] });
+  const readAuth = await authorizer.authorize(repo);
+  assert.equal(readAuth.ok, true);
+  assert.equal(readAuth.gitBoundary, 'root');
+  assert.equal(readAuth.kind, 'workspace');
+  const writeAuth = await authorizer.authorize(repo, { fresh: true });
+  assert.equal(writeAuth.ok, true);
+  // Both tiers must agree about the identity facts; only the discovery shortcut
+  // differs, and it never carries dev/ino.
+  assert.deepEqual(writeAuth.identity, readAuth.identity);
+  assert.deepEqual(writeAuth.gitDir, readAuth.gitDir);
+  assert.deepEqual(writeAuth.gitCommonDir, readAuth.gitCommonDir);
+  const outsider = createWorkspaceAuthorizer({ workspaceRoots: () => [repo] });
+  assert.equal((await outsider.authorize(scratch, { fresh: true })).ok, false);
+  resetDiscoveryCache();
 });
 
 await test('runGit accepted exits never hide process failures', async () => {
