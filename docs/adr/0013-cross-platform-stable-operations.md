@@ -43,3 +43,25 @@ CI 只能在 POSIX 宿主上**模拟**平台分支（Git 仍输出 POSIX 路径�
 3. **`mainRepoRootOf` 返回非规范路径**：它曾直接返回 `dirname(git-common-dir)`（Windows 上正斜杠），该值写入 worktree 元数据与创建事务日志，而所有读取方一律拿 realpath 规范路径比较 → 恢复恒判 `journal-invalid`，崩溃遗留的日志永不回收。修复：返回 `safeRealpath(dirname(…))`（POSIX 上等价）。
 
 新增覆盖：`worktreeRowHasPath` 的合成 Windows 行断言（在 POSIX CI 上以模拟 win32 运行），填补第 1 类的盲区；第 2、3 类由真机端到端验证确认。
+
+## 修订 2：发现缓存——缓存字符串，永不缓存身份（2026-10-24）
+
+### 新背景
+
+`detectRepo` 一次三个 Git 子进程（`--show-toplevel`、`--git-common-dir`、`--git-dir`），而读取路径对同一个目录会问很多遍：一次为授权选择器，一次在 `validateManagedWorktree`/`validateLinkedWorktree` 内部，选择器不是注册根时还要为**每个**注册根问一遍。Windows 上一次 spawn 实测均值约 0.8 s，于是 20 个工作区打开一次页面就要几百个进程，其中 27/45 花在重复发现上（ADR 0018）。
+
+### 补充决策
+
+1. 新增 `lib/discovery.js`：`detectRepoCached(path, { fresh })` 缓存**Git 打印出来的字符串**（`repoRoot`、`gitDir`、`gitCommonDir`、`isLinkedWorktree`、`mainRepoRoot`），TTL 30 s。
+2. 缓存键是「规范路径 + 该目录的 dev/ino」。命中前仍跑一次 `realpath` 与 `stat`；同一个拼写下换了一个目录（删掉重建、同义路径换绑）就是未命中，所以 ABA 里最廉价的那一类不会被缓存骗过。
+3. **身份永不缓存**：cwd、Git dir、common dir 的 dev/ino 在每次授权、每个提交点照旧重新 `stat` 并比对。第 3 条决策的边界核验与变更后复验没有因为缓存而减弱。
+4. **写入路径不走缓存**：`authorize(selector, { fresh: true })` 强制重新发现，所有变更路由与 `assertAuthorizationCurrent` 都传它。理由是变更门的键由授权推导，过期的发现会把写事务排进一个不再描述该仓库的键（ADR 0011）。注册根的发现即使在新路径上也走缓存：选择器自身的证明在下面一段仍是实时的。
+5. `validateManagedWorktree`/`validateLinkedWorktree` 接受 `{ detected }`，用于消掉一次授权内部的第二次发现；它们独立的调用方（归档、清理、创建）仍实时发现。
+6. 按文件/仓库的其它 TTL 缓存（默认分支、origin URL、比较基 ref）放在状态中枢，命中时同样不缓存身份，见 ADR 0018 决策 4。
+
+### 补充后果
+
+- 路径模式的过期窗口从「一次操作内的两端核验」放宽为「发现字符串最多 30 s 旧」。可观测的后果是：一个在 TTL 内被换绑成另一个仓库的目录，授权会先按旧字符串描述它，但接下来的 dev/ino 核验与身份比对会以 409 `identity-changed` 收敛，与既有路径模式的取舍一致（见本 ADR「后果」第二条）。
+- 缓存 1024 条上限、按插入顺序淘汰；`resetDiscoveryCache()` 供测试与显式重置。
+- 测试以三种方式证明它非空断言：第二次调用返回**同一个对象**（说明没有 spawn）、TTL 到期后不再相同、以及「删除仓库后在同一路径重建普通目录」必须判为未命中——把键改回只看路径，最后一条立刻失败。
+
