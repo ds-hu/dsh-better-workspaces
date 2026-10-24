@@ -572,6 +572,11 @@ await test('broken HEAD is not misclassified as unborn', async () => {
   git(broken, 'commit', '-m', 'initial');
   writeFileSync(join(broken, '.git', 'refs', 'heads', 'main'), 'bad\n');
   writeFileSync(join(broken, 'untracked.txt'), 'must not look like a new repository\n');
+  // The merged probe must refuse to answer here. `git status --branch` exits 0
+  // on a corrupted ref, printing `# branch.oid (initial)` and
+  // `# branch.head (unknown)` — reading that as "unborn" is precisely the
+  // misclassification this case exists to prevent.
+  assert.equal(await statusProbe(broken), null, 'a corrupted HEAD is not a probe answer');
   const stat = await diffStat(broken, null);
   assert.equal(stat.ok, false);
   assert.equal(stat.additions, null);
@@ -2514,8 +2519,20 @@ await test('api routes over real HTTP', async () => {
     assert.equal(snap.snapshot.branch, 'feature-x');
 
     const batch = await post('/snapshots', { cwds: [wt1.path, repo, scratch] });
-    assert.equal(batch.byCwd[wt1.path].isGit, true);
-    assert.equal(batch.byCwd[scratch].isGit, false);
+    assert.equal(batch.byCwd[wt1.path].isGit, true, 'a warm cwd is answered immediately');
+    // Everything not computed yet is *named* rather than awaited: the batch
+    // answers without waiting for a compute (ADR 0018).
+    const pendingSet = new Set(batch.pending);
+    assert.equal(pendingSet.has(wt1.path), false, 'a warmed cwd is never reported pending');
+    for (const cwd of [repo, scratch]) {
+      assert.ok(batch.byCwd[cwd] || pendingSet.has(cwd), `${cwd} is answered or explicitly pending`);
+    }
+    // `fresh` is the explicit "wait for it" shape, and it still answers a non-git
+    // workspace with isGit:false rather than pending.
+    const awaited = await post('/snapshots', { cwds: [repo, scratch], fresh: true });
+    assert.equal(awaited.byCwd[repo].isGit, true);
+    assert.equal(awaited.byCwd[scratch].isGit, false);
+    assert.deepEqual(awaited.pending, [], 'a fresh batch has nothing pending');
 
     writeFileSync(join(wt1.path, 'http.txt'), 'via http\n');
     const diff = await get(`/diff?cwd=${encodeURIComponent(wt1.path)}&mode=uncommitted`);
