@@ -924,8 +924,43 @@ const settle = (ms = 30) => new Promise((resolveWait) => setTimeout(resolveWait,
   assert.equal(sends.length, 3, 'a disposed scheduler never sends again');
 }
 
+/* ---------------- deferred Workspace recovery cadence ---------------- */
+{
+  const workspaces = [
+    { workspaceId: 'w1', path: '/ws/one' },
+    { workspaceId: 'w2', path: '/ws/two' },
+    { workspaceId: 'w3', path: '/ws/three' },
+  ];
+  // An empty feed is the boot state. The pass can see no candidates, and it must
+  // not conclude that the host is idle: a reload with a durable tombstone would
+  // then wait out the 5-minute interval for a state it never observed.
+  const cold = T.deferredRecoveryTargets(workspaces, {});
+  assert.deepEqual(cold, { candidates: [], unseen: 3 }, 'an empty feed leaves every row unanswered');
+  assert.equal(T.deferredRecoveryDelay(cold), T.DEFERRED_RECOVERY_BUSY_MS,
+    'an unanswered feed keeps the pass on the fast cadence');
+  // A partial feed is still unanswered for the remaining rows.
+  const partial = T.deferredRecoveryTargets(workspaces, {
+    '/ws/one': { cwd: '/ws/one', isGit: true, mainRepoRoot: '/ws/one' },
+  });
+  assert.deepEqual(partial, { candidates: ['/ws/one'], unseen: 2 });
+  assert.equal(T.deferredRecoveryDelay(partial), T.DEFERRED_RECOVERY_BUSY_MS);
+  // A settled feed is the only state that may back off: non-git rows and linked
+  // worktrees are answered, just not candidates.
+  const settled = T.deferredRecoveryTargets(workspaces, {
+    '/ws/one': { cwd: '/ws/one', isGit: true, mainRepoRoot: '/ws/one' },
+    '/ws/two': { cwd: '/ws/two', isGit: false },
+    '/ws/three': { cwd: '/ws/three', isGit: true, isLinkedWorktree: true, mainRepoRoot: '/ws/one' },
+  });
+  assert.deepEqual(settled, { candidates: ['/ws/one'], unseen: 0 });
+  assert.equal(T.deferredRecoveryDelay({ outstanding: 1, unseen: 0 }), T.DEFERRED_RECOVERY_BUSY_MS,
+    'an outstanding tombstone keeps the fast cadence');
+  assert.equal(T.deferredRecoveryDelay({ outstanding: 0, unseen: 0 }), T.DEFERRED_RECOVERY_IDLE_MS,
+    'a settled feed with no tombstones backs off');
+}
+
 /* ---------------- request ownership + draft handoff transactions ---------------- */
-const requestOwner = T.createRequestOwner();const firstRead = requestOwner.begin('read');
+const requestOwner = T.createRequestOwner();
+const firstRead = requestOwner.begin('read');
 const unrelated = requestOwner.begin('save');
 const latestRead = requestOwner.begin('read');
 assert.equal(requestOwner.owns(firstRead), false, 'new same-domain request supersedes the prior one');
