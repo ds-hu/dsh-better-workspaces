@@ -314,6 +314,54 @@ await test('hub repository facts are reused inside their TTL and dropped by inva
   }
 });
 
+await test('snapshotsFast answers without waiting and names what it scheduled', async () => {
+  const fastRepo = join(scratch, 'fast-repo');
+  mkdirSync(fastRepo);
+  gitInit(fastRepo, '-b', 'main');
+  git(fastRepo, 'config', 'user.email', 'test@dsh.local');
+  git(fastRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(fastRepo, 'a.txt'), 'alpha\n');
+  git(fastRepo, 'add', '-A');
+  git(fastRepo, 'commit', '-m', 'initial');
+  const hub = createGitStateHub({});
+  const waitForSnapshot = async (cwd, budgetMs) => {
+    const deadline = Date.now() + budgetMs;
+    while (!hub.peek(cwd) && Date.now() < deadline) await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    return hub.peek(cwd);
+  };
+  try {
+    const startedAt = Date.now();
+    const first = await hub.snapshotsFast([fastRepo]);
+    const elapsed = Date.now() - startedAt;
+    // An unseen workspace must not make the batch wait for a compute; on a cold
+    // 20-workspace host that wait was the whole page load.
+    assert.ok(elapsed < 1500, `the batch answered immediately (took ${elapsed} ms)`);
+    assert.deepEqual(first.byCwd, {}, 'nothing is known yet');
+    assert.deepEqual(first.pending, [fastRepo], 'the unseen cwd is named, not computed inline');
+    const filled = await waitForSnapshot(fastRepo, 120000);
+    assert.ok(filled, 'the scheduled compute filled the cache');
+    assert.equal(filled.isGit, true);
+    const second = await hub.snapshotsFast([fastRepo]);
+    assert.deepEqual(second.pending, [], 'a warmed cwd is answered from the cache');
+    assert.equal(second.byCwd[fastRepo].branch, 'main');
+    // A non-git path is not "pending" forever: once the negative cache knows it,
+    // it is answered with isGit:false (the client needs that to stop retrying).
+    await hub.snapshotsFast([scratch]);
+    const negativeDeadline = Date.now() + 30000;
+    let negative;
+    while (Date.now() < negativeDeadline) {
+      negative = await hub.snapshotsFast([scratch]);
+      if (Object.hasOwn(negative.byCwd, scratch)) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    }
+    assert.equal(Object.hasOwn(negative.byCwd, scratch), true, 'the negative answer is cached and returned');
+    assert.equal(negative.byCwd[scratch].isGit, false);
+  } finally {
+    await hub.dispose();
+    rmSync(fastRepo, { recursive: true, force: true });
+  }
+});
+
 await test('runGit accepted exits never hide process failures', async () => {
   const missing = await runGit(['rev-parse', '--verify', 'refs/heads/missing'], { cwd: repo });
   assert.equal(missing.ok, false);
