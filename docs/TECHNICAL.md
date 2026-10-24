@@ -17,7 +17,7 @@ See [CONTEXT.md](../CONTEXT.md) for the glossary and [docs/adr/](adr/) for the d
   "pending": ["…a cwd that is being computed right now…"] }
 ```
 
-A cwd that is absent from `byCwd` is "not known yet", **not** "not a git repository" — a non-git workspace answers `isGit: false` like it always did. Consumers keep rendering the previous snapshot until the SSE `snapshot` frame (or the next batch) fills it in, so a badge never blanks and repaints. Add `{ "fresh": true }` to wait for the compute (the client uses that only for its post-action refresh). The same rule explains the timings in this document: a read costs one authorization (cached discovery, live identity checks) and nothing else.
+A cwd that is absent from `byCwd` is "not known yet", **not** "not a git repository" — a non-git workspace answers `isGit: false` like it always did. Consumers keep rendering the previous snapshot until the SSE `snapshot` frame (or the next batch) fills it in, so a badge never blanks and repaints. Add `{ "fresh": true }` to wait for the compute (the client uses that only for its post-action refresh). The same rule explains the timings in this document: a read never pays for a compute. It does still pay one authorization per selector — one `rev-parse` per cold discovery entry, none while the 30 s cache is warm, plus live identity checks — so "independent of workspace count" is a statement about **computes**, not about authorizations: on a cold host process (plugin just loaded, or the page closed longer than the cache TTL) a batch pays one discovery per unseen workspace. Those authorizations of the never-wait path run in the **background** lane, so a click can never queue behind a page load's fan-out.
 
 ## Install (web profile)
 
