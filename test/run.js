@@ -362,6 +362,43 @@ await test('snapshotsFast answers without waiting and names what it scheduled', 
   }
 });
 
+await test('hub invalidateFamily recomputes one repository family and leaves the rest alone', async () => {
+  const famRepo = join(scratch, 'family-repo');
+  const famWt = join(scratch, 'family-worktree');
+  const otherRepo = join(scratch, 'other-repo');
+  for (const path of [famRepo, otherRepo]) {
+    mkdirSync(path);
+    gitInit(path, '-b', 'main');
+    git(path, 'config', 'user.email', 'test@dsh.local');
+    git(path, 'config', 'user.name', 'DSH Test');
+    writeFileSync(join(path, 'a.txt'), 'alpha\n');
+    git(path, 'add', '-A');
+    git(path, 'commit', '-m', 'initial');
+  }
+  git(famRepo, 'worktree', 'add', '-b', 'family-branch', famWt, 'main');
+  const hub = createGitStateHub({});
+  const waitForSnapshot = async (cwd) => {
+    const deadline = Date.now() + 120000;
+    while (!hub.peek(cwd) && Date.now() < deadline) await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    return hub.peek(cwd);
+  };
+  try {
+    for (const cwd of [famRepo, famWt, otherRepo]) {
+      await hub.snapshotFor(cwd);
+      assert.ok(await waitForSnapshot(cwd), `${cwd} computed`);
+    }
+    // The two checkouts of famRepo share a main root; otherRepo does not.
+    assert.equal(await hub.invalidateFamily(famRepo), 2, 'the family — main checkout and its worktree — is scheduled');
+    assert.equal(await hub.invalidateFamily(otherRepo), 1, 'a different repository is its own family');
+    assert.equal(await hub.invalidateFamily(join(scratch, 'not-a-repo-or-tracked')), 0, 'an unknown cwd schedules nothing');
+    // The minute sweep is capped so it can never become a full refresh wave.
+    assert.equal(hub.sweepNow(), 3, 'the sweep covers at most its cap of targets');
+  } finally {
+    await hub.dispose();
+    for (const path of [famWt, famRepo, otherRepo]) rmSync(path, { recursive: true, force: true });
+  }
+});
+
 await test('runGit accepted exits never hide process failures', async () => {
   const missing = await runGit(['rev-parse', '--verify', 'refs/heads/missing'], { cwd: repo });
   assert.equal(missing.ok, false);

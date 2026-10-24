@@ -588,6 +588,25 @@ try {
     assert.equal(readdirSync(nested).some((name) => name.startsWith('.bw-') && name.endsWith('.tmp')), false);
   }
 
+  // A tombstone listing is a READ and must not queue behind the repository's
+  // write gate (ADR 0011 serializes mutations, not reads). With the gate held
+  // by this test, the route still answers; before the fix it blocked until the
+  // holder released it, which is the 1.2-minute `/worktrees/deferred` on a busy
+  // host. The old shape would time out here.
+  const releaseForRead = await hostMutationCoordinator.acquire(gitFamilyKey);
+  let readEnteredGate = false;
+  observeMutation = (key) => {
+    if (key === gitFamilyKey) readEnteredGate = true;
+  };
+  const deferredRead = await Promise.race([
+    request(`/worktrees/deferred?cwd=${encodeURIComponent(repo)}`),
+    new Promise((resolveLate) => setTimeout(() => resolveLate({ status: 'timeout' }), 5000)),
+  ]);
+  observeMutation = null;
+  releaseForRead();
+  assert.notEqual(deferredRead.status, 'timeout', 'the deferred listing must answer while a mutation holds the gate');
+  assert.equal(readEnteredGate, false, 'a read never enters the repository write gate');
+
   // Authorization is captured before queueing, then re-proven after the outer
   // workspace gate. Reusing the same lexical root with a new inode must not let
   // an old queued file save mutate the replacement workspace.
