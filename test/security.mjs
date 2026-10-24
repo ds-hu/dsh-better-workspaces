@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -19,8 +20,10 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-// DSH_BW_TEST_TMP moves the scratch tree onto a faster/excluded volume.
-const scratchRoot = process.env.DSH_BW_TEST_TMP?.trim() || tmpdir();
+// DSH_BW_TEST_TMP moves the scratch tree onto a faster/excluded volume. The
+// root is canonicalized for the same reason as in test/run.js, and `.native`
+// is what actually expands an 8.3 short name.
+const scratchRoot = realpathSync.native(process.env.DSH_BW_TEST_TMP?.trim() || tmpdir());
 const sandbox = mkdtempSync(join(scratchRoot, 'dsh-bw-security-'));
 process.env.DSH_HOME = join(sandbox, 'dsh-home');
 

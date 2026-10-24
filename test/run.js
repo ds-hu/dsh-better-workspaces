@@ -12,7 +12,15 @@ import http from 'node:http';
 
 // DSH_BW_TEST_TMP moves the scratch tree (thousands of files, and every one of
 // them is scanned on Windows): point it at an antivirus-excluded or faster volume.
-const scratchRoot = process.env.DSH_BW_TEST_TMP?.trim() || tmpdir();
+// The root is canonicalized because `%TEMP%` may be reached through an 8.3 short
+// name (`C:\Users\RUNNER~1\...`) while `realpath` and Git report the long form
+// (`C:\Users\runneradmin\...`); comparing the two failed 43 cases on a GitHub
+// runner in ~71 ms apiece. `.native` matters: the JS implementation walks
+// components with readlink and leaves a short name alone, so only the native
+// call expands it. `--tmp=<dir>` exists so that condition is reproducible
+// locally (pass a short-name path such as `C:\ProgRA~1`).
+const tmpArgument = (process.argv.find((arg) => arg.startsWith('--tmp=')) ?? '').slice('--tmp='.length);
+const scratchRoot = realpathSync.native(tmpArgument.trim() || process.env.DSH_BW_TEST_TMP?.trim() || tmpdir());
 const scratch = mkdtempSync(join(scratchRoot, 'dsh-bw-test-'));
 process.env.DSH_HOME = join(scratch, 'dshhome');
 mkdirSync(process.env.DSH_HOME, { recursive: true });
@@ -3292,9 +3300,17 @@ await test('worktreesDir inside the main checkout is refused before it is create
 });
 
 rmSync(scratch, { recursive: true, force: true });
-console.log(results.join('\n'));
-if (process.exitCode) {
-  console.log('SMOKE: FAILED');
-} else {
-  console.log('SMOKE: ALL PASS');
-}
+
+// Report a leaked handle and exit on purpose. A finished suite must never turn
+// into a job that waits out its timeout: on a GitHub Windows runner every case
+// had reported within 17 s, then the process sat on the event loop for the next
+// 44 minutes until the job was cancelled. Naming the residue here is what makes
+// the next occurrence a one-minute diagnosis instead of an afternoon.
+const IGNORED_HANDLES = new Set(['Socket', 'WriteStream', 'ReadStream', 'Pipe', 'TTY']);
+const residue = [...new Set((process._getActiveHandles?.() ?? [])
+  .map((handle) => handle?.constructor?.name ?? 'unknown')
+  .filter((name) => !IGNORED_HANDLES.has(name)))];
+const summary = [...results, `SMOKE: ${process.exitCode ? 'FAILED' : 'ALL PASS'}`];
+if (residue.length > 0) summary.push(`SMOKE: handles still open at exit: ${residue.join(', ')}`);
+// The callback runs once the pipe has flushed, so CI never loses the report.
+process.stdout.write(`${summary.join('\n')}\n`, () => process.exit(process.exitCode ?? 0));

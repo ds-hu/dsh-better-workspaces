@@ -42,6 +42,7 @@ for (const spec of MODULES) {
 // Same module instance the mount configures, so the assertions below observe
 // the real override rather than a fresh copy.
 const { defaultWorktreesRoot, worktreesRoot } = await import('../lib/worktree.js');
+const { createGitStateHub } = await import('../lib/state.js');
 
 function fakeCtx({ withWebServer, registerThrows = false }) {
   const effects = [];
@@ -383,6 +384,35 @@ for (const withWebServer of [false, true]) {
     /unknown plugin config key/,
   );
   console.log('worktreesDir config ok');
+}
+
+// A hub whose housekeeping timers hold the event loop turns "the suite finished"
+// into "the job waited out its timeout": on a hosted Windows runner every case
+// had reported within 17 seconds and the job still ran to its 45-minute limit.
+// Asserting `unref()` here keeps that a seconds-long failure instead.
+{
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const handles = [];
+  globalThis.setInterval = () => {
+    const handle = { unrefd: false, unref() { handle.unrefd = true; } };
+    handles.push(handle);
+    return handle;
+  };
+  globalThis.clearInterval = () => {};
+  try {
+    const hub = createGitStateHub({ onChange: () => {} });
+    await hub.dispose();
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+  assert.ok(handles.length >= 2, `the hub starts its housekeeping intervals (saw ${handles.length})`);
+  assert.ok(
+    handles.every((handle) => handle.unrefd),
+    'every housekeeping interval must be unref\'d, or a leaked hub pins the process',
+  );
+  console.log(`housekeeping timers ok: ${handles.length} unref'd`);
 }
 
 // A duplicate route must dispose the API heartbeat immediately; the simulated

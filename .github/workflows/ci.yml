@@ -36,9 +36,12 @@ jobs:
   windows:
     name: Windows path model (Node 22)
     runs-on: windows-latest
-    # Spawn-bound: each `git` invocation pays process creation plus antivirus.
-    # Measured worst case on a workstation is ~20 minutes for these three suites.
-    timeout-minutes: 45
+    # The whole three-suite run takes about a minute of work on a hosted runner;
+    # the budget is headroom for a slow image, not an expectation. A finished
+    # suite can no longer sit on the event loop (the state hub's timers are
+    # unref'd and test/run.js exits after flushing its report), which is what
+    # once burned 44 minutes of a 45-minute timeout after 17 seconds of tests.
+    timeout-minutes: 20
     steps:
       # Before checkout: the repository ships no .gitattributes, and the suites
       # compare exact bytes, so a CRLF checkout would fail hundreds of asserts.
