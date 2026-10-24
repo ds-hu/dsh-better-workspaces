@@ -157,7 +157,7 @@ await test('branches + default branch', async () => {
   assert.equal(branches.every((b) => b.hasLocal), true);
 });
 
-await test('discovery cache: repeats are cached, identities and re-creations are not', async () => {
+await test('discovery cache: repeats are cached, a replaced directory is not', async () => {
   resetDiscoveryCache();
   const first = await detectRepoCached(repo);
   const second = await detectRepoCached(repo);
@@ -168,18 +168,24 @@ await test('discovery cache: repeats are cached, identities and re-creations are
   assert.notEqual(freshRun, first, 'a mutation path always re-discovers');
   assert.deepEqual(freshRun, first, 'and it discovers the same repository');
 
-  // The key carries dev/ino, so the same spelling with a different directory
-  // behind it is a miss. A path-only cache returns the stale `isGit: true`
-  // after the repository is deleted and a plain directory takes its place.
-  const reused = join(scratch, 'reused-path');
-  mkdirSync(reused);
-  gitInit(reused, '-b', 'main');
-  assert.equal((await detectRepoCached(reused)).isGit, true);
-  rmSync(reused, { recursive: true, force: true });
-  mkdirSync(reused);
-  const afterRecreation = await detectRepoCached(reused);
-  assert.equal(afterRecreation.isGit, false, 'a re-created directory must not hit the old entry');
-  rmSync(reused, { recursive: true, force: true });
+  // The key carries dev/ino, so the same spelling with a DIFFERENT directory
+  // behind it is a miss. Both directories exist at the same time here, which is
+  // what makes the inodes distinct by construction: deleting and re-creating a
+  // directory can be handed the same inode back (ext4 does), and that residual
+  // window is documented in lib/discovery.js rather than asserted away.
+  const target = join(scratch, 'reused-path');
+  const original = join(scratch, 'reused-original');
+  const replacement = join(scratch, 'reused-replacement');
+  mkdirSync(replacement); // created first, so its inode cannot be the repo's
+  mkdirSync(original);
+  gitInit(original, '-b', 'main');
+  renameSync(original, target);
+  assert.equal((await detectRepoCached(target)).isGit, true, 'the repository is discovered');
+  renameSync(target, original);
+  renameSync(replacement, target);
+  const afterSwap = await detectRepoCached(target);
+  assert.equal(afterSwap.isGit, false, 'a different directory at the same spelling must not hit the old entry');
+  for (const path of [target, original]) rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   resetDiscoveryCache();
 });
 
@@ -394,8 +400,14 @@ await test('hub invalidateFamily recomputes one repository family and leaves the
     // The minute sweep is capped so it can never become a full refresh wave.
     assert.equal(hub.sweepNow(), 3, 'the sweep covers at most its cap of targets');
   } finally {
-    await hub.dispose();
-    for (const path of [famWt, famRepo, otherRepo]) rmSync(path, { recursive: true, force: true });
+    await hub.dispose().catch(() => {});
+    // Unregister the linked worktree before deleting directories, then retry:
+    // a watcher or antivirus scanner can still hold the directory for a moment,
+    // and a cleanup hiccup must not mask a real assertion from the body.
+    try { git(famRepo, 'worktree', 'remove', '--force', famWt); } catch { /* best effort */ }
+    for (const path of [famWt, famRepo, otherRepo]) {
+      try { rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* scratch tree */ }
+    }
   }
 });
 
