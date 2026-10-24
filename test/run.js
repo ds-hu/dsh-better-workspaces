@@ -25,7 +25,8 @@ const scratch = mkdtempSync(join(scratchRoot, 'dsh-bw-test-'));
 process.env.DSH_HOME = join(scratch, 'dshhome');
 mkdirSync(process.env.DSH_HOME, { recursive: true });
 
-const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, listCommits, unpushedShas } = await import('../lib/git.js');
+const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, withBackgroundGitLane, currentGitLane, listCommits, unpushedShas } = await import('../lib/git.js');
+const { createLane } = await import('../lib/lane.js');
 const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../lib/worktree.js');
 const { computeDiff, commitDiff } = await import('../lib/diff.js');
 const { commitAction, pullAction, pushAction, discardAction, updateFromBaseAction, createPrAction, buildActionLadder } = await import('../lib/actions.js');
@@ -199,6 +200,68 @@ await test('runGit limiter preserves each caller pinned environment', async () =
   // separator, so compare through the platform normalizer (ADR 0013), not ===.
   assert.equal(normalizeGitPath(result.stdout.trim()), normalizeGitPath(repo));
   await Promise.all(blockers);
+});
+
+await test('lane: a foreground call never waits behind queued background work', async () => {
+  const lane = createLane({ capacity: 1 });
+  const order = [];
+  let releaseFirst;
+  const gate = new Promise((resolveGate) => { releaseFirst = resolveGate; });
+  const first = lane.run(async () => { order.push('first'); await gate; });
+  const background = lane.run(async () => { order.push('background'); }, { background: true });
+  const foreground = lane.run(async () => { order.push('foreground'); });
+  releaseFirst();
+  await Promise.all([first, background, foreground]);
+  // The background task was queued first and still runs last: that is the whole
+  // point of the class split. If the lane ignored it, this would be
+  // [first, background, foreground].
+  assert.deepEqual(order, ['first', 'foreground', 'background']);
+});
+
+await test('lane: background uses the whole capacity on an idle host', async () => {
+  const lane = createLane({ capacity: 2 });
+  let peak = 0;
+  let active = 0;
+  const task = () => lane.run(async () => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    active -= 1;
+  }, { background: true });
+  await Promise.all([task(), task(), task(), task()]);
+  assert.equal(peak, 2, 'background fills the lane when nothing is queued ahead of it');
+  assert.deepEqual(lane.stats(), { active: 0, foreground: 0, background: 0 });
+});
+
+await test('lane: a long-waiting background task is promoted instead of starved', async () => {
+  let clock = 0;
+  const lane = createLane({ capacity: 1, promoteAfterMs: 1000, now: () => clock });
+  const order = [];
+  let releaseFirst;
+  const gate = new Promise((resolveGate) => { releaseFirst = resolveGate; });
+  const first = lane.run(async () => { order.push('first'); await gate; });
+  // The foreground task queues FIRST, so plain FIFO would run it first. Only
+  // promotion may put the background task ahead of it.
+  const foreground = lane.run(async () => { order.push('foreground'); });
+  clock = 500;
+  const background = lane.run(async () => { order.push('background'); }, { background: true });
+  clock = 1500; // the background task has now waited its full budget
+  releaseFirst();
+  await Promise.all([first, background, foreground]);
+  assert.deepEqual(order, ['first', 'background', 'foreground'],
+    'promotion outranks a foreground task that was queued earlier');
+});
+
+await test('git: the background lane scope survives nested awaits', async () => {
+  assert.equal(currentGitLane(), 'foreground');
+  const observed = await withBackgroundGitLane(async () => {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1));
+    const nested = await runGit(['rev-parse', '--verify', 'HEAD'], { cwd: repo });
+    assert.equal(nested.ok, true, nested.stderr);
+    return currentGitLane();
+  });
+  assert.equal(observed, 'background');
+  assert.equal(currentGitLane(), 'foreground', 'the scope is restored on exit');
 });
 
 await test('parent-guarded Git cannot outlive a killed Host worker', async () => {
