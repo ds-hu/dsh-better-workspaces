@@ -1,7 +1,7 @@
 {
   "name": "@ds-hu/dsh-better-workspaces",
   "description": "Worktrees, diffs, pull requests, and issue references inside the DeepSeek Harness Web GUI",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "type": "module",
   "publishConfig": {
     "access": "public"
