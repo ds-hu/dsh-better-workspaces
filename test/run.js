@@ -25,7 +25,7 @@ const scratch = mkdtempSync(join(scratchRoot, 'dsh-bw-test-'));
 process.env.DSH_HOME = join(scratch, 'dshhome');
 mkdirSync(process.env.DSH_HOME, { recursive: true });
 
-const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, withBackgroundGitLane, currentGitLane, listCommits, unpushedShas } = await import('../lib/git.js');
+const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, withBackgroundGitLane, currentGitLane, statusProbe, currentBranchInfo, listCommits, unpushedShas } = await import('../lib/git.js');
 const { createLane } = await import('../lib/lane.js');
 const { detectRepoCached, resetDiscoveryCache, setDiscoveryClock } = await import('../lib/discovery.js');
 const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../lib/worktree.js');
@@ -216,6 +216,102 @@ await test('authorize: the write path bypasses the discovery cache', async () =>
   const outsider = createWorkspaceAuthorizer({ workspaceRoots: () => [repo] });
   assert.equal((await outsider.authorize(scratch, { fresh: true })).ok, false);
   resetDiscoveryCache();
+});
+
+await test('statusProbe matches the narrow probes it replaces', async () => {
+  const probeRepo = join(scratch, 'probe-repo');
+  mkdirSync(probeRepo);
+  gitInit(probeRepo, '-b', 'main');
+  git(probeRepo, 'config', 'user.email', 'test@dsh.local');
+  git(probeRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(probeRepo, 'a.txt'), 'alpha\n');
+  writeFileSync(join(probeRepo, 'b.txt'), 'b\n');
+  git(probeRepo, 'add', '-A');
+  git(probeRepo, 'commit', '-m', 'initial');
+  const compare = async (label) => {
+    const probe = await statusProbe(probeRepo);
+    const [branchInfo, status] = await Promise.all([currentBranchInfo(probeRepo), porcelainStatus(probeRepo)]);
+    assert.ok(probe, `${label}: the merged probe answered`);
+    assert.equal(probe.branch, branchInfo.branch, `${label}: branch`);
+    assert.equal(probe.detached, Boolean(branchInfo.detached), `${label}: detached`);
+    assert.equal(probe.detachedShort, branchInfo.detachedShort ?? null, `${label}: detachedShort`);
+    assert.equal(probe.sha, branchInfo.sha, `${label}: sha`);
+    assert.equal(probe.unborn, Boolean(branchInfo.unborn), `${label}: unborn`);
+    assert.equal(probe.dirty, status.dirty, `${label}: dirty`);
+    // Entry order is Git's own; compare the multiset so a serializer difference
+    // cannot masquerade as a semantic one.
+    const flatten = (entries) => entries
+      .map((entry) => `${entry.code} ${entry.path}${entry.oldPath ? ` <- ${entry.oldPath}` : ''}`)
+      .sort();
+    assert.deepEqual(flatten(probe.entries), flatten(status.entries), `${label}: entries`);
+    return probe;
+  };
+  try {
+    await compare('clean');
+    writeFileSync(join(probeRepo, 'new.txt'), 'new\n');
+    await compare('untracked');
+    writeFileSync(join(probeRepo, 'a.txt'), 'alpha\nchanged\n');
+    await compare('modified');
+    git(probeRepo, 'add', 'a.txt');
+    await compare('staged');
+    git(probeRepo, 'mv', 'b.txt', 'renamed.txt');
+    const renamed = await compare('renamed');
+    const renameEntry = renamed.entries.find((entry) => entry.code.startsWith('R'));
+    assert.ok(renameEntry, 'the rename is reported as a rename');
+    assert.equal(renameEntry.path, 'renamed.txt');
+    assert.equal(renameEntry.oldPath, 'b.txt', 'the pre-rename path is parsed from its own -z record');
+    git(probeRepo, 'checkout', '--detach');
+    await compare('detached');
+    git(probeRepo, 'checkout', 'main');
+  } finally {
+    rmSync(probeRepo, { recursive: true, force: true });
+  }
+
+  const unbornRepo = join(scratch, 'probe-unborn');
+  mkdirSync(unbornRepo);
+  try {
+    gitInit(unbornRepo, '-b', 'main');
+    const probe = await statusProbe(unbornRepo);
+    const branchInfo = await currentBranchInfo(unbornRepo);
+    assert.ok(probe);
+    assert.equal(probe.unborn, true);
+    assert.equal(probe.sha, null);
+    assert.equal(probe.branch, branchInfo.branch);
+  } finally {
+    rmSync(unbornRepo, { recursive: true, force: true });
+  }
+});
+
+await test('hub repository facts are reused inside their TTL and dropped by invalidate', async () => {
+  const factsRepo = join(scratch, 'facts-repo');
+  mkdirSync(factsRepo);
+  gitInit(factsRepo, '-b', 'main');
+  git(factsRepo, 'config', 'user.email', 'test@dsh.local');
+  git(factsRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(factsRepo, 'a.txt'), 'alpha\n');
+  git(factsRepo, 'add', '-A');
+  git(factsRepo, 'commit', '-m', 'initial');
+  const hub = createGitStateHub({});
+  try {
+    const first = await hub.snapshotFor(factsRepo, { fresh: true });
+    assert.equal(first.isGit, true);
+    assert.equal(first.defaultBranch, 'main');
+    assert.ok(hub.stats().facts > 0, 'the compute cached repository facts');
+    const factsAfterFirst = hub.stats().facts;
+    await hub.snapshotFor(factsRepo, { fresh: true });
+    assert.equal(hub.stats().facts, factsAfterFirst, 'a second compute reuses the same fact keys');
+    // The default branch can move. Inside the TTL the fact is served from the
+    // cache — that staleness is the trade-off — and `invalidate()` is what
+    // proves the cache can be dropped. Without the drop this stays 'main'.
+    git(factsRepo, 'branch', '-m', 'main', 'trunk');
+    const stale = await hub.snapshotFor(factsRepo, { fresh: true });
+    assert.equal(stale.defaultBranch, 'main', 'the fact is reused inside its TTL');
+    const refreshed = await hub.invalidate(factsRepo);
+    assert.equal(refreshed.defaultBranch, 'trunk', 'invalidate drops the cached fact');
+  } finally {
+    await hub.dispose();
+    rmSync(factsRepo, { recursive: true, force: true });
+  }
 });
 
 await test('runGit accepted exits never hide process failures', async () => {
