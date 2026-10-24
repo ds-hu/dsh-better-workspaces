@@ -4,7 +4,7 @@ Architecture, installation details, release verification, development, operation
 
 ## Architecture
 
-- **Host** (`lib/index.js` → `git.js`, `worktree.js`, `cleanup.js`, `forge.js`, `diff.js`, `actions.js`, `state.js`, `api.js`, with `stable.js` as the platform-anchoring layer): git-CLI primitives behind an 8-way concurrency scheduler; managed worktrees under `~/.dsh/worktrees/<8-char base36 sha256(mainRepoRoot)>/<repo>-<branch>` — the leaf carries the repository name so it is identifiable on its own, and both halves are budgeted to keep it ≤65 characters — with `<gitdir>/dsh-worktree/worktree.json` metadata and three creation intents — `branch-off` (cut from a base), `checkout`, and `pr-checkout` (fetch the forge's `refs/pull/<N>/head` from origin/upstream, create the local branch with `git worktree add -b … --no-track <sha>`, take the PR's own base as the diff baseline, and track `origin/<headRef>` for same-repo PRs only); the leaf derives from `<repo>-<branch>` on the host, so the client sends no directory slug and the plugin makes no LLM calls of its own; snapshot hub with fs watchers (1 s debounce, degraded 5 s polling), 180 s background fetch and fingerprint-deduped SSE; `forge.js` serves both the batched PR/checks GraphQL and the picker's issue/PR pages (`GET /pulls`, `GET /pull`) through the user's `gh` CLI (30 s cache, never tokens); HTTP+SSE API on the harness webServer under `/better-workspaces/api`.
+- **Host** (`lib/index.js` → `git.js`, `worktree.js`, `cleanup.js`, `forge.js`, `diff.js`, `actions.js`, `state.js`, `api.js`, with `stable.js` as the platform-anchoring layer): git-CLI primitives behind an 8-way concurrency scheduler; managed worktrees under `<worktreesDir>/<8-char base36 sha256(mainRepoRoot)>/<repo>-<branch>` — `worktreesDir` defaults to `~/.dsh/worktrees` and is settable as the row's config key (see [Configuration](#configuration-worktree-base-directory), ADR 0017) — the leaf carries the repository name so it is identifiable on its own, and both halves are budgeted to keep it ≤65 characters — with `<gitdir>/dsh-worktree/worktree.json` metadata and three creation intents — `branch-off` (cut from a base), `checkout`, and `pr-checkout` (fetch the forge's `refs/pull/<N>/head` from origin/upstream, create the local branch with `git worktree add -b … --no-track <sha>`, take the PR's own base as the diff baseline, and track `origin/<headRef>` for same-repo PRs only); the leaf derives from `<repo>-<branch>` on the host, so the client sends no directory slug and the plugin makes no LLM calls of its own; snapshot hub with fs watchers (1 s debounce, degraded 5 s polling), 180 s background fetch and fingerprint-deduped SSE; `forge.js` serves both the batched PR/checks GraphQL and the picker's issue/PR pages (`GET /pulls`, `GET /pull`) through the user's `gh` CLI (30 s cache, never tokens); HTTP+SSE API on the harness webServer under `/better-workspaces/api`.
 - **Client** (`lib/client.js`, hand-written `__ModuleLoader__` bundle): slot-registered right-Sidebar diff page + dock pill + composer forge control (`conversation.input.left`) with its `@` reference source/codec for issue/PR chips; DOM injection (MutationObserver + React portals + anchor self-check with silent degradation, ADR 0001) for the hero dropdown and sidebar badges, which have no fine-grained slots.
 
 See [CONTEXT.md](../CONTEXT.md) for the glossary and [docs/adr/](adr/) for the design records.
@@ -39,6 +39,38 @@ Uninstall is symmetric — reconcile also drops the bundle from `dsh.profile.bun
 ```bash
 dsh plugin --profile web remove @ds-hu/dsh-better-workspaces
 ```
+
+## Configuration (worktree base directory)
+
+Managed worktrees live under `<worktreesDir>/<8-char base36 sha256(mainRepoRoot)>/<repo>-<branch>`. `worktreesDir` is a plugin-row config key; when it is absent the base is `$DSH_HOME/worktrees` (`~/.dsh/worktrees`). This is **config-only on purpose** — there is no UI for it (ADR 0017).
+
+Set it by patching the mount row in your profile's `cordis.patch.yml`:
+
+```yaml
+# $DSH_HOME/profiles/web/cordis.patch.yml
+- id: better-workspaces
+  config:
+    worktreesDir: 'D:\worktrees'
+```
+
+That entry is a **patch, not a second mount**: it carries no `insert` and no `name`, so `@deepseek-ai/cordis-plugin-include` resolves the row the package's own bundle layer inserted and assigns `config` to it. Profile layers are applied after every bundle layer, so the row always exists by the time this patch runs — and adding `insert` or a second `name` here is the ADR 0007 `duplicate loader entry id` boot failure. `dsh --profile web --dump-config` shows the resulting row, `config` included.
+
+Rules the host enforces:
+
+| Value | Behaviour |
+|---|---|
+| `~`, `~/…`, `~\…` | expanded to the home directory |
+| `$VAR` / `%VAR%` | **not** expanded — write the literal path |
+| empty / absent | the built-in base; a config-layer reload that drops the key restores it |
+| relative path, non-string, unknown key | the row **fails to mount**, with the offending value in the message; the plugin never falls back to a different directory |
+| non-existent directory | created on first use (exactly as `$DSH_HOME/worktrees` always was) |
+| symlink / junction / short-name path | refused on first use — the managed root must be a real direct directory (ADR 0010) |
+| path inside the checkout being branched | refused on first use, so a typo cannot nest a worktree inside the repository |
+| `config` in a patch | replaces the row's whole config (host patch semantics); this row ships no config today, so the snippet is complete |
+
+**Changing it later strands the existing worktrees.** Managed identity is namespace membership: a checkout under a base that is no longer configured stops being managed. It keeps working — diffs, commits, pushes, PRs and merge actions never depended on managed metadata — but archive and abandoned cleanup no longer reach it, and `/detect` reports `managed: false`, which moves the diff view's default scope from task to session/uncommitted. The plugin writes one warning to the host log at startup naming both directories and the count; in-flight create journals and registry tombstones under the previous base are not scanned either, so finish any in-flight creation before you change the value. Decide the base before creating worktrees, or archive what you no longer need and move what you do with `git worktree move`.
+
+The config layer is live in the `web` profile, so a change re-applies the row without a restart; sessions keep their cwd either way, which means only worktrees created afterwards land under the new base. (When in doubt, restart — a stale row is indistinguishable from a typo until you look.)
 
 ## Verifying a release against a live dsh (required before publishing)
 
@@ -184,7 +216,20 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs ESLint, scratch-repository Host tests, security and mutation suites, the fast client contract smoke test, a real React + JSDOM effect/focus/cleanup suite, mount checks, and an npm-pack allowlist test that requires NOTICE, both locale dictionaries, the icon, and all third-party licenses. CI repeats the same gate on the latest Node 20 and Node 22 releases on Ubuntu.
+`npm run check` runs ESLint, scratch-repository Host tests, security and mutation suites, the fast client contract smoke test, a real React + JSDOM effect/focus/cleanup suite, mount checks, and an npm-pack allowlist test that requires NOTICE, both locale dictionaries, the icon, and all third-party licenses. CI runs that full gate on Ubuntu with the latest Node 20 and Node 22, and a second job on `windows-latest` (Node 22, host + security + mount) for the half of the implementation Linux cannot see: the Windows path model of ADR 0013.
+
+### Running the suites locally
+
+The Host suite is dominated by process spawns and file writes — on Windows every `git` invocation, and every freshly written fixture file, goes through antivirus — so the same cases take about a minute on Linux CI and anywhere from 7 to 40 minutes on a Windows workstation. Measured on one such box: a `git` spawn against a warm repository averaged 822 ms with a 78 ms minimum and a 2.9 s maximum, while a whole worktree creation costs only a handful of milliseconds of `fsync`. Three knobs keep local runs usable:
+
+- `npm run test:host -- --progress` prints one line per case with its duration, so a stalled run is distinguishable from a slow one.
+- `npm run test:host -- --only=worktreesDir,archive` runs only the cases whose label contains one of the needles. Use it for self-contained cases — several share fixtures created by earlier ones — and never as a substitute for the full gate.
+- `DSH_BW_TEST_TMP=<dir>` moves the scratch tree (thousands of files) onto a faster or antivirus-excluded volume. Fixture repositories are also initialized from an empty Git template, so each one writes 9 files instead of 27; the option is passed first because one fixture supplies a positional directory (`git init --separate-git-dir <dir> <work>`).
+- `--tmp=<dir>` does the same for one run. The scratch root is canonicalized with `realpathSync.native` — the JS implementation walks components and leaves an 8.3 short name alone — because a hosted Windows runner reaches `%TEMP%` as `C:\Users\RUNNER~1\…` while Git and `realpath` report `C:\Users\runneradmin\…`; comparing those two failed 43 cases. Pass a short-name path (`--tmp=C:\ProgRA~1\…`) to reproduce that class locally; it also exercises the "use that canonical path" hint for a `worktreesDir` given in short form.
+
+A finished suite exits on purpose: `test/run.js` prints its report, lists any handle still open, and exits once the report has flushed. The state hub's housekeeping timers are `unref()`ed for the same reason. Without both, a case that leaked a hub (or an HTTP server a failing case never closed) left the process on the event loop — on a hosted Windows runner that meant every case reported within 17 seconds and the job then sat until its timeout.
+
+Cases whose fixture cannot exist on Windows are recorded as `SKIP <label>: <reason>` — never as a pass, because a skip says nothing about the guard it would prove. They are: POSIX shells with `/usr/bin/git` and process-group kill (the parent-guard and inspect/remove-race fixtures), control characters, quotes and a literal backslash in file names (the porcelain `-z` decoding case), `which` + `:`-separated `PATH` (the fake `git`), `/proc/self/fd` (the descriptor-leak count), a Windows absolute path inside a ref name (the push-option injection case), and the fake `gh` behind the forge suite — a `#!/bin/sh` script that Windows neither executes nor searches, so the *real* `gh` answered, reached github.com over the network, and made five cases slow and state-dependent. All of them run in full on Linux CI; what a Windows run adds is the platform-specific behaviour — path-mode anchoring, exchange-capability gating, and NTFS mode/identity quirks (`0o664` reads back as `0o666`; a file index above 2^53 makes `ino + 1` round to itself).
 
 ## Operations: cold start and restart self-check
 

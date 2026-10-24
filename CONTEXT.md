@@ -40,8 +40,12 @@ _Avoid_: 创建失败、草稿丢失
 工作区根目录就是仓库自身工作副本（而非链接 worktree）的状态；worktree 模式菜单的两项之一，默认选中、且随时可选回（选中即退出暂存态，与「新建 worktree」互斥）。
 _Avoid_: 主目录、原目录
 
+**worktrees 基目录（worktrees base directory）**：
+托管 worktree 命名空间的父目录：默认 `<DSH_HOME>/worktrees`，可由插件行的配置键 `worktreesDir` 改写（写在 profile 的 `cordis.patch.yml`，本插件不提供界面）。每个仓库在其下按 `projectHash(主检出)` 取得专属托管根，因此基目录只替换 hash 分组的父层，不替换分组本身。配置在挂载时定格：必须是绝对路径（`~` 展开，相对路径与非字符串拒绝且不回落默认值），必须是直接规范目录（不得为符号链接），且不得位于被创建仓库的主检出内。托管身份按命名空间判定，所以改动基目录会把既有托管 worktree 降为普通 worktree（diff/提交/推送仍可用，归档与 abandoned 清理不再触及），启动日志点名被落下的目录与数量。
+_Avoid_: worktree 根（保留给 `<hash>` 那层托管根）、缓存目录、工作目录
+
 **托管 worktree**：
-由本插件在对应来源仓库的专属 worktrees 根下创建、元数据与 Git worktree 清单都能证明其归属的链接工作树；只有托管 worktree 才有资格进入归档生命周期。单有目录名或元数据文件不构成托管身份。
+由本插件在该来源仓库于 worktrees 基目录下的专属托管根（`<基目录>/<projectHash(主检出)>`）中创建、元数据与 Git worktree 清单都能证明其归属的链接工作树；只有托管 worktree 才有资格进入归档生命周期。单有目录名或元数据文件不构成托管身份。
 _Avoid_: 临时目录、副本
 
 **原生 worktree（native worktree）**：
