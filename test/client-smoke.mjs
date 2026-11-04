@@ -924,6 +924,73 @@ const settle = (ms = 30) => new Promise((resolveWait) => setTimeout(resolveWait,
   assert.equal(sends.length, 3, 'a disposed scheduler never sends again');
 }
 
+/* One row the host refuses must not stop the batch. The refusal is remembered
+   for that cwd only, reported once, and re-admitted when the retry window
+   expires so a row that becomes valid again recovers without a reload. */
+{
+  let clock = 0;
+  const deny = T.createDenyList(60000, () => clock);
+  assert.deepEqual(deny.filter(['/ws/one', '/ws/two']), ['/ws/one', '/ws/two'], 'nothing is refused yet');
+  assert.equal(deny.mark('/ws/two'), true, 'a first refusal is worth one report');
+  assert.equal(deny.mark('/ws/two'), false, 'the same refusal is not reported every poll');
+  assert.deepEqual(deny.filter(['/ws/one', '/ws/two']), ['/ws/one'],
+    'the refused row leaves the batch and the healthy rows stay in it');
+  clock += 59999;
+  assert.deepEqual(deny.filter(['/ws/one', '/ws/two']), ['/ws/one'], 'inside the window the refusal stands');
+  clock += 1;
+  assert.deepEqual(deny.filter(['/ws/one', '/ws/two']), ['/ws/one', '/ws/two'],
+    'expiry re-admits the selector so a repaired row recovers');
+  deny.mark('/ws/two');
+  deny.clear('/ws/two');
+  assert.deepEqual(deny.filter(['/ws/two']), ['/ws/two'], 'untracking forgets the refusal');
+  assert.equal(deny.mark(''), false, 'an empty selector is not a refusal');
+}
+
+/* A refused selector that sits inside an authorized working copy is not a dead
+   row: the host names that checkout, and the row reads it instead. The entry
+   records when it was learned (nothing announces a registry change, so it has to
+   expire) and the lookup is one hop, so a dependent alias is compressed when its
+   target turns out to belong somewhere else. */
+{
+  const empty = {};
+  const at = 1000;
+  const learned = T.learnGitAlias(empty, '/ws/app/src', '/ws/app', at);
+  assert.deepEqual(learned, { '/ws/app/src': { root: '/ws/app', at } }, 'the working copy becomes the row key');
+  assert.equal(T.learnGitAlias(learned, '/ws/app/src', '/ws/app', at + 5), learned,
+    're-learning the same answer is a no-op');
+  assert.deepEqual(T.learnGitAlias(learned, '/ws/app/src', '/ws/other', at + 5)['/ws/app/src'],
+    { root: '/ws/other', at: at + 5 }, 'a new answer replaces the old one');
+  assert.equal(T.learnGitAlias(empty, '/ws/app', '/ws/app', at), empty, 'a root is not its own fallback');
+  assert.equal(T.learnGitAlias(empty, '', '/ws/app', at), empty, 'an empty selector learns nothing');
+  assert.equal(T.learnGitAlias(empty, '/ws/app/src', '', at), empty, 'a refusal without a root learns nothing');
+
+  // Compression: a row already aliased to `/ws/app/src` must move to the new
+  // root in the same step — the lookup reads one hop and never follows a chain.
+  let table = T.learnGitAlias({}, '/ws/app/deep', '/ws/app/src', at);
+  table = T.learnGitAlias(table, '/ws/app/src', '/ws/other', at + 1);
+  assert.deepEqual(table, {
+    '/ws/app/deep': { root: '/ws/other', at: at + 1 },
+    '/ws/app/src': { root: '/ws/other', at: at + 1 },
+  }, 'a dependent alias is compressed onto the new root instead of chaining');
+
+  const two = { '/ws/a/x': { root: '/ws/a', at }, '/ws/b/y': { root: '/ws/b', at } };
+  assert.deepEqual(T.forgetGitAlias(two, '/ws/a'), { '/ws/b/y': { root: '/ws/b', at } },
+    'a gone root drops its rows');
+  assert.equal(T.forgetGitAlias(two, '/ws/c'), two, 'an unrelated refusal changes nothing');
+  assert.equal(T.forgetGitAlias(two, ''), two, 'an empty target changes nothing');
+
+  const aged = { '/ws/a/x': { root: '/ws/a', at: 1000 }, '/ws/b/y': { root: '/ws/b', at: 61000 } };
+  assert.deepEqual(T.expireGitAliases(aged, 61000, 60000), { '/ws/b/y': { root: '/ws/b', at: 61000 } },
+    'an answer older than the TTL is dropped so the row asks about itself again');
+  const none = {};
+  assert.equal(T.expireGitAliases(none, 5, 60000), none, 'nothing to expire changes nothing');
+
+  let bounded = {};
+  for (let i = 0; i < 5; i += 1) bounded = T.learnGitAlias(bounded, '/ws/x' + i, '/ws', i, 3);
+  assert.deepEqual(Object.keys(bounded), ['/ws/x2', '/ws/x3', '/ws/x4'],
+    'the table is bounded and evicts the oldest alias first');
+}
+
 /* ---------------- deferred Workspace recovery cadence ---------------- */
 {
   const workspaces = [

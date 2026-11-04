@@ -66,6 +66,7 @@ let roots = [repo, nested, plain];
 // from `snapshotsFast` by default, so a guard that only watched `snapshots`
 // would pass no matter what the route did (ADR 0018).
 let snapshotsCalls = 0;
+let snapshotsBatch;
 const snapshotOf = (cwd) => ({ cwd, isGit: existsSync(join(cwd, '.git')) });
 const hub = {
   async snapshotFor(cwd) {
@@ -73,10 +74,12 @@ const hub = {
   },
   async snapshots(cwds) {
     snapshotsCalls += 1;
+    snapshotsBatch = [...cwds];
     return Object.fromEntries(cwds.map((cwd) => [cwd, snapshotOf(cwd)]));
   },
   async snapshotsFast(cwds) {
     snapshotsCalls += 1;
+    snapshotsBatch = [...cwds];
     return { byCwd: Object.fromEntries(cwds.map((cwd) => [cwd, snapshotOf(cwd)])), pending: [] };
   },
   async invalidate() {},
@@ -158,15 +161,77 @@ try {
     const result = await request(path, jsonInit(body));
     assert.equal(result.status, 403, path);
   }
+  // Authorization is per selector even though the answer is one batch: the
+  // sidebar asks for every rendered row at once, and one Session that moved
+  // into a subdirectory (or a checkout that no longer exists) must not blank
+  // every other row's badges. The refused selector is named and never reaches
+  // the hub, which is the property ADR 0010 actually needs.
   snapshotsCalls = 0;
-  const atomic = await request('/snapshots', jsonInit({ cwds: [repo, outside] }));
-  assert.equal(atomic.status, 403);
-  assert.equal(snapshotsCalls, 0, 'an invalid batch must not reach the snapshot hub at all');
+  snapshotsBatch = null;
+  const partial = await request('/snapshots', jsonInit({ cwds: [repo, outside] }));
+  assert.equal(partial.status, 200, 'a partly authorized batch answers the authorized part');
+  assert.equal(Object.keys(partial.body.byCwd).length, 1, 'only the authorized selector is answered');
+  assert.deepEqual(partial.body.unauthorized, [{ cwd: outside, status: 403, error: 'workspace not authorized' }]);
+  assert.equal(snapshotsCalls, 1);
+  assert.deepEqual(snapshotsBatch, Object.keys(partial.body.byCwd), 'an unauthorized selector never reaches the snapshot hub');
   assert.equal(readFileSync(join(outside, 'tracked.txt'), 'utf8'), 'one\n');
+
+  // Nothing authorized is still a failure, and the first denial in request
+  // order decides it so the error never depends on timing.
+  snapshotsCalls = 0;
+  const refused = await request('/snapshots', jsonInit({ cwds: [outside, join(sandbox, 'missing')] }));
+  assert.equal(refused.status, 403);
+  assert.equal(refused.body.error, 'workspace not authorized');
+  assert.equal(snapshotsCalls, 0, 'a batch with no authorized selector must not reach the hub at all');
 
   for (const selector of ['relative/path', join(sandbox, 'missing')]) {
     assert.equal((await request(`/detect?path=${encodeURIComponent(selector)}`)).status, 403);
   }
+
+  // A Session that moved into a subdirectory of its Workspace stays refused —
+  // the path is not a capability — but the refusal names the working copy that
+  // contains it, so a row can read that checkout instead of disappearing.
+  const sessionSubdir = join(repo, 'session-subdir');
+  mkdirSync(sessionSubdir, { recursive: true });
+  const insideOnly = await request('/snapshots', jsonInit({ cwds: [sessionSubdir] }));
+  assert.equal(insideOnly.status, 403, 'a subdirectory alone still fails');
+  assert.deepEqual(insideOnly.body.unauthorized, [
+    { cwd: sessionSubdir, status: 403, error: 'workspace not authorized', enclosingRoot: repo },
+  ], 'the failure still names the working copy that contains the selector');
+  // A registered *subdirectory* workspace owns the paths under it, and by
+  // decision it has no repository-level authority: answering with its ancestor's
+  // repository would route around that, so it gets no fallback at all.
+  const nestedSub = join(nested, 'deep');
+  mkdirSync(nestedSub, { recursive: true });
+  const nestedOnly = await request('/snapshots', jsonInit({ cwds: [nestedSub] }));
+  assert.equal(nestedOnly.status, 403);
+  assert.deepEqual(nestedOnly.body.unauthorized, [
+    { cwd: nestedSub, status: 403, error: 'workspace not authorized' },
+  ], 'a registered subdirectory workspace is never answered by its ancestor repository');
+  // A native worktree lives inside the registered main checkout, so containment
+  // alone would answer with the main checkout — a different branch, index and
+  // working tree. The row must read the worktree the Session is actually in.
+  const nativeWt = join(repo, '.agents', 'worktrees', 'native-one');
+  git(repo, 'worktree', 'add', '-b', 'native-one', nativeWt);
+  const nativeSub = join(nativeWt, 'pkg');
+  mkdirSync(nativeSub);
+  const inNative = await request('/snapshots', jsonInit({ cwds: [nativeSub] }));
+  assert.equal(inNative.status, 403);
+  assert.equal(inNative.body.unauthorized[0].enclosingRoot, nativeWt,
+    'a worktree subdirectory reads its own worktree, never the main checkout');
+  // A path outside every root has nothing to fall back to.
+  const partialInside = await request('/snapshots', jsonInit({ cwds: [repo, sessionSubdir, outside] }));
+  assert.equal(partialInside.status, 200);
+  assert.deepEqual(partialInside.body.unauthorized, [
+    { cwd: sessionSubdir, status: 403, error: 'workspace not authorized', enclosingRoot: repo },
+    { cwd: outside, status: 403, error: 'workspace not authorized' },
+  ], 'a path outside every root has nothing to fall back to');
+  assert.deepEqual(Object.keys(partialInside.body.byCwd), [repo], 'the enclosing root is not smuggled into the hub answer');
+  // An empty batch has no refusals to report and must stay a 200 like before.
+  const emptyBatch = await request('/snapshots', jsonInit({ cwds: [] }));
+  assert.equal(emptyBatch.status, 200, 'an empty batch is answered, not crashed');
+  assert.deepEqual(emptyBatch.body.byCwd, {});
+  assert.deepEqual(emptyBatch.body.pending, []);
   const failedProvider = createWorkspaceAuthorizer({ workspaceRoots: () => { throw new Error('registry offline'); } });
   assert.equal((await failedProvider.authorize(repo)).ok, false, 'registry errors fail closed');
   const anchored = join(sandbox, 'anchored-workspace');
