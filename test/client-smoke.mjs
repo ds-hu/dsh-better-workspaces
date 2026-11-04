@@ -948,16 +948,22 @@ const settle = (ms = 30) => new Promise((resolveWait) => setTimeout(resolveWait,
 
 /* A refused selector that sits inside an authorized working copy is not a dead
    row: the host names that checkout, and the row reads it instead. The entry
-   records when it was learned (nothing announces a registry change, so it has to
-   expire) and the lookup is one hop, so a dependent alias is compressed when its
-   target turns out to belong somewhere else. */
+   records when the host last said so — nothing announces a registry change — and
+   the lookup is one hop, so a dependent alias is compressed when its target turns
+   out to belong somewhere else.
+
+   Revalidation is a *question*, never a mutation: a due alias is asked about in
+   the next batch, and confirming it only refreshes the timestamp. Removing it
+   here would change the row's cwd, and that cwd is the key of its open diff
+   page — a timer must not remount a page the user is typing into. */
 {
   const empty = {};
   const at = 1000;
   const learned = T.learnGitAlias(empty, '/ws/app/src', '/ws/app', at);
   assert.deepEqual(learned, { '/ws/app/src': { root: '/ws/app', at } }, 'the working copy becomes the row key');
-  assert.equal(T.learnGitAlias(learned, '/ws/app/src', '/ws/app', at + 5), learned,
-    're-learning the same answer is a no-op');
+  const confirmed = T.learnGitAlias(learned, '/ws/app/src', '/ws/app', at + 5);
+  assert.deepEqual(confirmed, { '/ws/app/src': { root: '/ws/app', at: at + 5 } },
+    'confirming the same answer refreshes when the host last said so');
   assert.deepEqual(T.learnGitAlias(learned, '/ws/app/src', '/ws/other', at + 5)['/ws/app/src'],
     { root: '/ws/other', at: at + 5 }, 'a new answer replaces the old one');
   assert.equal(T.learnGitAlias(empty, '/ws/app', '/ws/app', at), empty, 'a root is not its own fallback');
@@ -978,12 +984,15 @@ const settle = (ms = 30) => new Promise((resolveWait) => setTimeout(resolveWait,
     'a gone root drops its rows');
   assert.equal(T.forgetGitAlias(two, '/ws/c'), two, 'an unrelated refusal changes nothing');
   assert.equal(T.forgetGitAlias(two, ''), two, 'an empty target changes nothing');
+  assert.deepEqual(T.dropGitAlias(two, '/ws/a/x'), { '/ws/b/y': { root: '/ws/b', at } },
+    'an answered selector drops only its own alias');
+  assert.equal(T.dropGitAlias(two, '/ws/c/z'), two, 'dropping an unknown selector changes nothing');
 
   const aged = { '/ws/a/x': { root: '/ws/a', at: 1000 }, '/ws/b/y': { root: '/ws/b', at: 61000 } };
-  assert.deepEqual(T.expireGitAliases(aged, 61000, 60000), { '/ws/b/y': { root: '/ws/b', at: 61000 } },
-    'an answer older than the TTL is dropped so the row asks about itself again');
-  const none = {};
-  assert.equal(T.expireGitAliases(none, 5, 60000), none, 'nothing to expire changes nothing');
+  assert.deepEqual(T.staleGitAliases(aged, 61000, 60000), ['/ws/a/x'],
+    'a due alias is reported for a probe, not removed');
+  assert.equal(aged['/ws/a/x'].root, '/ws/a', 'the probe leaves the alias in place');
+  assert.deepEqual(T.staleGitAliases({}, 5, 60000), [], 'nothing to check reports nothing');
 
   let bounded = {};
   for (let i = 0; i < 5; i += 1) bounded = T.learnGitAlias(bounded, '/ws/x' + i, '/ws', i, 3);
