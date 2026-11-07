@@ -989,15 +989,57 @@ const settle = (ms = 30) => new Promise((resolveWait) => setTimeout(resolveWait,
   assert.equal(T.dropGitAlias(two, '/ws/c/z'), two, 'dropping an unknown selector changes nothing');
 
   const aged = { '/ws/a/x': { root: '/ws/a', at: 1000 }, '/ws/b/y': { root: '/ws/b', at: 61000 } };
+  const agedBefore = JSON.parse(JSON.stringify(aged));
   assert.deepEqual(T.staleGitAliases(aged, 61000, 60000), ['/ws/a/x'],
     'a due alias is reported for a probe, not removed');
-  assert.equal(aged['/ws/a/x'].root, '/ws/a', 'the probe leaves the alias in place');
+  assert.deepEqual(aged, agedBefore, 'the probe leaves the alias table untouched');
   assert.deepEqual(T.staleGitAliases({}, 5, 60000), [], 'nothing to check reports nothing');
 
   let bounded = {};
   for (let i = 0; i < 5; i += 1) bounded = T.learnGitAlias(bounded, '/ws/x' + i, '/ws', i, 3);
   assert.deepEqual(Object.keys(bounded), ['/ws/x2', '/ws/x3', '/ws/x4'],
     'the table is bounded and evicts the oldest alias first');
+}
+
+/* A batch must fit the host's 200-selector limit, and the probes must give way
+   rather than take the whole feed down: a 413 carries no byCwd and no
+   unauthorized, so an oversized batch could never refresh the aliases that made
+   it oversized and every badge would stay dead for as long as the tab lives. */
+{
+  assert.equal(T.SNAPSHOT_BATCH_MAX, 200, 'the client clamps to the host limit');
+  const at = 1000;
+  const due = { '/ws/a/src': { root: '/ws/a', at }, '/ws/b/src': { root: '/ws/b', at } };
+  const tracked = { '/ws/a': {}, '/ws/b': {}, '/ws/c': {} };
+  const plan = T.planSnapshotBatch(tracked, due, at + 600000, 200);
+  assert.deepEqual(plan.probing, ['/ws/a/src', '/ws/b/src'], 'due aliases ride along by default');
+  assert.deepEqual(plan.cwds, ['/ws/a', '/ws/b', '/ws/c', '/ws/a/src', '/ws/b/src'],
+    'tracked rows come first and the probes are appended');
+  assert.ok(plan.cwds.length <= 200, 'the batch fits the host limit');
+
+  const full = {};
+  for (let i = 0; i < 200; i += 1) full['/ws/f' + i] = {};
+  const clamped = T.planSnapshotBatch(full, due, at + 600000, 200);
+  assert.deepEqual(clamped.probing, [], 'a full batch asks about nothing else');
+  assert.equal(clamped.cwds.length, 200, 'the batch is exactly the host limit, never over it');
+
+  const almost = {};
+  for (let i = 0; i < 198; i += 1) almost['/ws/n' + i] = {};
+  const partial = T.planSnapshotBatch(almost, due, at + 600000, 200);
+  assert.deepEqual(partial.probing, ['/ws/a/src', '/ws/b/src'], 'the remaining room is used in due order');
+  assert.equal(partial.cwds.length, 200, 'probes fill the room and stop there');
+  const oneRoom = T.planSnapshotBatch({ ...almost, '/ws/n198': {} }, due, at + 600000, 200);
+  assert.deepEqual(oneRoom.probing, ['/ws/a/src'], 'a single slot admits a single probe');
+  assert.equal(oneRoom.cwds.length, 200, 'the clamp holds at the edge');
+
+  // An alias that is already a tracked row is not a probe: it is in the batch
+  // anyway, and counting it twice would waste a slot.
+  const trackedAlias = T.planSnapshotBatch({ '/ws/a/src': {}, '/ws/a': {} }, due, at + 600000, 200);
+  assert.deepEqual(trackedAlias.probing, ['/ws/b/src'], 'a tracked alias is not probed again');
+  assert.deepEqual(trackedAlias.cwds, ['/ws/a/src', '/ws/a', '/ws/b/src'], 'and the batch stays deduplicated');
+
+  // Only due aliases are probed: a confirmation is not re-sent early.
+  const fresh = T.planSnapshotBatch({}, { '/ws/a/src': { root: '/ws/a', at } }, at + 1000, 200);
+  assert.deepEqual(fresh, { cwds: [], probing: [] }, 'a fresh alias waits for its turn');
 }
 
 /* ---------------- deferred Workspace recovery cadence ---------------- */
