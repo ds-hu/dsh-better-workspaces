@@ -94,14 +94,18 @@ owner record 是本 ADR 引入的（提交 `6e509f2`，2026-09-11）。在此之
 ### 补充决策
 
 1. 收据重放的身份证明只由两样东西构成：收据的 `requestFingerprint`，以及该检出自身元数据里的 `creationTxId`/`creationFingerprint`——即「这条事务创建了这个检出」。当前分支不参与判断。
-2. 「当前分支不是身份」是全局规则，不是重放这一处的特例。所有读路径与动作路径统一改问 `validateManagedCheckout`（内部即 `allowBranchMismatch`）：快照的 `managed`、动作阶梯的 Archive 门禁、清理候选、侧栏分支图标、`authorize` 的 `kind` 判定与 txId 扫描都据此回答。**只**有两处仍要求严格形态，并各自写明理由：崩溃 journal 的恢复（破坏性决定需要精确证据）与刚完成创建的收尾后置条件。
-3. 放宽不派生任何删除权限：archive 按检出**实际**所在分支（`managed.actualBranch`）归档，cleanup 的风险守卫读的是不可变基线提交与**当前**分支而非元数据里的分支名，因此改名后的 worktree 归档时删的是正确的分支，有任务提交或未推送的检出照旧被跳过。
-4. 重放的回答描述检出的**当前**状态：`result.branch` 取 `actualBranch` 而非创建时记录的分支——工作区标题与侧栏标签都由它生成。
+2. 「当前分支不是身份」是**读路径与动作路径**的规则，不是重放这一处的特例，也不是全局规则。这些调用点统一改问 `validateManagedCheckout`（内部即 `allowBranchMismatch`）：快照的 `managed`、动作阶梯的 Archive 门禁、侧栏分支图标、`authorize` 的 `kind` 判定（连带 `/detect`、标题自愈与任务 diff）、worktree 列表与 txId 扫描。另有**三处**保留严格形态，各自写明理由：崩溃 journal 的恢复、刚完成创建的收尾后置条件，以及清理候选（下一条）。
+3. 清理仍用严格形态，因为它的风险守卫读的是检出的**活 HEAD**。dirty、相对不可变基线的超出提交、以及当前分支的未推送 ref，量的都是它现在所在的分支；一个被切到别处、在新分支上与基线齐平且工作树干净的检出，会让这三条全部通过，而真正的未推送工作留在它离开的那条分支上——sweep 于是会删掉这个检出、连带它的 ignored 文件与工作区行，并报出一条工作从未发生过的分支名。分支相等不是身份，但对一次**自动** sweep，它是让那三条守卫名副其实的前提。回归测试固定该场景：漂移且带未推送提交的检出必须被报告、不被清扫，提交仍可达。
+   - 用户主动点的 Archive 不是同一类决定：检出现在眼前，归档只删检出、分支与提交始终保留，动作阶梯对 dirty/未推送另有警告。
+   - 装配现状：清理的**候选循环**今天到不了——插件以 `recoveryOnly: true` 构造清理，进程内定时任务传 `abandoned: true, automatic: true`，HTTP 路由不传 `abandoned`。因此本条描述的是「将来打开 sweep 时必须成立」，不是今天就生效的行为；本修订早先的注释与后果把「每轮 sweep 报 ownership 错误」当作既成事实，那是错的。
+4. 重放的回答描述检出的**当前**状态：`result.branch` 取 `actualBranch`，否则退回创建时记录的分支。后者只在 detached HEAD 时出现（worktree 列表行的 `branch` 为 `null`），那时「当前分支」没有名字，退回记录的旧名只是可显示值，不承诺它就是 HEAD。
 5. 同 tx 不同指纹仍然冲突（回到 Amendment 1 的规则），回归测试固定这一点。
+6. 改了 `worktreesDir`（ADR 0017）之后，旧基目录下的检出不再属于受管根，收据重放得到 `transaction-receipt-mismatch`。这是**有意的**：插件不认领当前基目录之外的检出，那个检出原地保留、分支完好，由 ADR 0017 的 stranded 提示负责让人看见；释放后新建的那一个落在新基目录，不是重复创建。
 
 ### 补充后果
 
 - 一个创建后又被切了分支的 worktree，现在重放为 `committed`，客户端拿到原收据里的 path/workspaceId 继续交接，不再被锁死；回答里的分支名是它现在所在的分支。
-- 漂移的检出在产品里不再是「未知检出」：Archive 可用、进入清理候选、侧栏保留分支图标、`authorize` 仍判为 `managed-worktree`。
+- 漂移的检出在产品里不再是「未知检出」：Archive 可用、侧栏保留分支图标、`authorize` 仍判为 `managed-worktree`、`/detect` 仍报 `managed`，标题自愈与任务 diff 因此恢复。
+- 自动 sweep 对它仍然拒绝并报告（决策 3）。这条只有在将来解除 `recoveryOnly` 之后才会被观察到。
 - 收据指向的检出若真的被替换或不可读，仍按原样 conflict（`transaction-target-replaced` / `transaction-target-unreadable`）。
 - 客户端在冲突时释放事务记录（ADR 0016 Amendment 1），与此处的放宽互为兜底：两侧都不会再产生永久锁。

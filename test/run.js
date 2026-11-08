@@ -3531,12 +3531,18 @@ await test('cleanup abandoned sweep: unreferenced+old only', async () => {
   const wtOld = await createWorktree({ repoRoot: repo, intent: 'branch-off', slug: 'abandon-old-0001' });
   const wtFresh = await createWorktree({ repoRoot: repo, intent: 'branch-off', slug: 'abandon-fresh-0002' });
   const wtBusy = await createWorktree({ repoRoot: repo, intent: 'branch-off', slug: 'abandon-busy-0003' });
-  // A checkout whose branch was renamed after creation is still an abandoned
-  // candidate — and the report names the branch it is on, not the one it was
-  // created with. Refusing it here used to report an ownership error on every
-  // sweep and leak the checkout forever.
+  // A checkout that was switched to another branch must NOT be swept. Every risk
+  // guard reads the LIVE HEAD, so after the switch the tree is clean and level
+  // with the base while the real work sits on the branch it left — sweeping it
+  // would remove the checkout, its ignored files and its Workspace row, and
+  // report a branch that work was never done on. The strict form is what keeps
+  // those guards honest; the drift is reported, never swept.
   const wtDrift = await createWorktree({ repoRoot: repo, intent: 'branch-off', slug: 'abandon-drift-0004' });
-  git(wtDrift.path, 'checkout', '-b', 'abandon-drift-renamed');
+  writeFileSync(join(wtDrift.path, 'left-behind.txt'), 'real work\n');
+  git(wtDrift.path, 'add', '-A');
+  git(wtDrift.path, 'commit', '-m', 'unpushed work on the branch it leaves');
+  const driftSha = git(wtDrift.path, 'rev-parse', 'HEAD').trim();
+  git(wtDrift.path, 'checkout', '-b', 'abandon-drift-renamed', 'main');
   wsEntities.push(
     { path: wtOld.path, workspaceId: 'ws-abandon-old-0001' },
     { path: wtFresh.path, workspaceId: 'ws-abandon-fresh-0002' },
@@ -3550,16 +3556,21 @@ await test('cleanup abandoned sweep: unreferenced+old only', async () => {
     s3: { header: { cwd: wtBusy.path }, blank: false },
   };
   const report = await createCleanup(mkCtx(byId))({ abandoned: true, minAgeMs: 60000 });
-  assert.equal(report.ok, true, JSON.stringify(report));
+  assert.equal(report.ok, false,
+    'a drifted checkout makes the sweep report a failure instead of passing silently: ' + JSON.stringify(report));
   assert.ok(report.archived.some((a) => a.path === wtOld.path), JSON.stringify(report));
-  assert.ok(report.archived.some((a) => a.path === wtDrift.path && a.branch === 'abandon-drift-renamed'),
-    'a drifted checkout is swept, reported under the branch it is on: ' + JSON.stringify(report.archived));
+  assert.equal(report.archived.some((a) => a.path === wtDrift.path), false,
+    'a drifted checkout is never swept: the unpushed work is on the branch it left');
+  assert.ok(report.errors.some((e) => e.path === wtDrift.path && /metadata-git-branch-mismatch/.test(String(e.message))),
+    'the drift is reported instead of swept: ' + JSON.stringify(report.errors));
+  assert.ok(existsSync(wtDrift.path), 'the checkout survives, with its ignored files');
+  assert.equal(git(wtDrift.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'abandon-drift-renamed');
+  assert.equal(git(repo, 'cat-file', '-t', driftSha).trim(), 'commit', 'and the work is still reachable');
+  assert.equal(report.workspacesDeleted.includes('ws-abandon-drift-0004'), false);
   assert.ok(report.workspacesDeleted.includes('ws-abandon-old-0001'), JSON.stringify(report.workspacesDeleted));
-  assert.ok(report.workspacesDeleted.includes('ws-abandon-drift-0004'), JSON.stringify(report.workspacesDeleted));
   assert.ok(report.skipped.some((s) => s.path === wtFresh.path && s.reason === 'young'));
   assert.ok(report.skipped.some((s) => s.path === wtBusy.path && s.reason === 'session'));
   assert.ok(!existsSync(wtOld.path));
-  assert.ok(!existsSync(wtDrift.path));
   assert.ok(existsSync(wtFresh.path) && existsSync(wtBusy.path));
 
   const abandonedRaceRepo = join(scratch, 'cleanup-abandoned-race-repo');

@@ -81,6 +81,7 @@ transaction`，除手工删除文件之外没有任何出路。
 
 1. 释放集合是 `retired` / `absent` / `transaction_conflict`（`releaseCreationTxOnFailure`）；`transaction_pending` 不在其中——那条事务仍在进行中，重放它才是收敛方式。
 2. 释放的代价被显式接受：在「目标并非已消失」的那几类冲突里——`transaction-target-unreadable`、`transaction-target-identity-changed`，以及收据仍在但指纹或路径已不可重放的 `transaction-receipt-mismatch`——下一次「创建」可能在旧检出旁边建一个兄弟（`target-1`）。这与宿主对「分支名已被占用」给出的答案一致，而且只发生在用户已经看到一次拒绝之后；若按「只放行目标确实消失的原因」收窄，等于把永久锁还给 `transaction-target-replaced`——正是本次现场故障的形态。
+   - 还有一类不在上面三条里，记在案：一次**暂时性**的核对失败。`git worktree list` 读不到时，`validateManagedWorktree` 的答案与「这个检出不是我们的」不可区分，会落到 `transaction-target-replaced`；释放于是让下一次点击在健康检出旁边建一个兄弟。代价是一个多余检出，不丢任何东西（原检出与其分支、提交都在）。正确做法是让宿主把「无法核对」与「核对失败」分开回答，本修订没有做——若这类误判在真实使用中变得常见，那就是该补的状态，而不是把释放规则收窄。
 
 ### 补充后果
 
