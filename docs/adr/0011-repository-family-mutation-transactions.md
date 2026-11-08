@@ -87,18 +87,21 @@ owner record 是本 ADR 引入的（提交 `6e509f2`，2026-09-11）。在此之
 
 ### 新背景
 
-一次现场故障：某会话在 11-06 成功创建了 worktree（收据与元数据齐备、指纹一致），随后工作就在那个检出里进行，分支被改成了另一条。此后该发起会话每次点「创建」都得到同一句 `hero.txConflict`（「同一创建事务的请求不一致，已保留原请求」），换任何分支名都无效，唯一出路是手工清 `localStorage`。
+一次现场故障：某会话在 11-06 成功创建了 worktree（收据与元数据齐备、指纹一致），随后工作就在那个检出里进行，分支被改成了另一条。此后该发起会话每次点「创建」都得到同一句 `hero.txConflict`（当时的文案是「同一创建事务的请求不一致，已保留原请求」，该措辞随后按 ADR 0016 Amendment 1 更正），换任何分支名都无效，唯一出路是手工清 `localStorage`。
 
 原因在重放的身份证明上：`findWorktreeCreation` 用 `validateManagedWorktree` 的**严格**答案校验收据指向的检出，于是「元数据分支 == git 当前分支」成了重放成立的前提。检出就是干活的地方，分支改名或切换是正常使用，不是「目标被替换」；而客户端对未结算事务的收敛规则会持续重发同一个 txId，所以这条严格检查把一次**早已成功**的创建变成了永久的 409。
 
 ### 补充决策
 
-1. 收据重放的身份证明只由两样东西构成：收据的 `requestFingerprint`，以及该检出自身元数据里的 `creationTxId`/`creationFingerprint`——即「这条事务创建了这个检出」。当前分支不参与判断，该调用点传 `allowBranchMismatch: true`。
-2. 放宽只作用于「回答哪个事务创建了它」，不派生任何删除权限：cleanup 仍以严格校验复验，漂移的检出被**报告**而不是被清扫；archive 本来就按检出**实际**所在分支（`managed.actualBranch`）归档，因此改名后的 worktree 归档时删的是正确的分支。
-3. 同 tx 不同指纹仍然冲突（回到 Amendment 1 的规则），回归测试固定这一点。
+1. 收据重放的身份证明只由两样东西构成：收据的 `requestFingerprint`，以及该检出自身元数据里的 `creationTxId`/`creationFingerprint`——即「这条事务创建了这个检出」。当前分支不参与判断。
+2. 「当前分支不是身份」是全局规则，不是重放这一处的特例。所有读路径与动作路径统一改问 `validateManagedCheckout`（内部即 `allowBranchMismatch`）：快照的 `managed`、动作阶梯的 Archive 门禁、清理候选、侧栏分支图标、`authorize` 的 `kind` 判定与 txId 扫描都据此回答。**只**有两处仍要求严格形态，并各自写明理由：崩溃 journal 的恢复（破坏性决定需要精确证据）与刚完成创建的收尾后置条件。
+3. 放宽不派生任何删除权限：archive 按检出**实际**所在分支（`managed.actualBranch`）归档，cleanup 的风险守卫读的是不可变基线提交与**当前**分支而非元数据里的分支名，因此改名后的 worktree 归档时删的是正确的分支，有任务提交或未推送的检出照旧被跳过。
+4. 重放的回答描述检出的**当前**状态：`result.branch` 取 `actualBranch` 而非创建时记录的分支——工作区标题与侧栏标签都由它生成。
+5. 同 tx 不同指纹仍然冲突（回到 Amendment 1 的规则），回归测试固定这一点。
 
 ### 补充后果
 
-- 一个创建后又被切了分支的 worktree，现在重放为 `committed`，客户端拿到原收据里的 path/workspaceId 继续交接，不再被锁死。
+- 一个创建后又被切了分支的 worktree，现在重放为 `committed`，客户端拿到原收据里的 path/workspaceId 继续交接，不再被锁死；回答里的分支名是它现在所在的分支。
+- 漂移的检出在产品里不再是「未知检出」：Archive 可用、进入清理候选、侧栏保留分支图标、`authorize` 仍判为 `managed-worktree`。
 - 收据指向的检出若真的被替换或不可读，仍按原样 conflict（`transaction-target-replaced` / `transaction-target-unreadable`）。
 - 客户端在冲突时释放事务记录（ADR 0016 Amendment 1），与此处的放宽互为兜底：两侧都不会再产生永久锁。

@@ -80,9 +80,10 @@ transaction`，除手工删除文件之外没有任何出路。
 ### 补充决策
 
 1. 释放集合是 `retired` / `absent` / `transaction_conflict`（`releaseCreationTxOnFailure`）；`transaction_pending` 不在其中——那条事务仍在进行中，重放它才是收敛方式。
-2. 释放的代价被显式接受：在「检出还在、只是不再属于这条事务」的两类冲突（`transaction-target-unreadable`、`transaction-target-identity-changed`）里，下一次「创建」会在它旁边建一个兄弟（`target-1`）。这与宿主对「分支名已被占用」给出的答案一致，而且只发生在用户已经看到一次拒绝之后；若按「只放行目标确实消失的原因」收窄，等于把永久锁还给 `transaction-target-replaced`——正是本次现场故障的形态。
+2. 释放的代价被显式接受：在「目标并非已消失」的那几类冲突里——`transaction-target-unreadable`、`transaction-target-identity-changed`，以及收据仍在但指纹或路径已不可重放的 `transaction-receipt-mismatch`——下一次「创建」可能在旧检出旁边建一个兄弟（`target-1`）。这与宿主对「分支名已被占用」给出的答案一致，而且只发生在用户已经看到一次拒绝之后；若按「只放行目标确实消失的原因」收窄，等于把永久锁还给 `transaction-target-replaced`——正是本次现场故障的形态。
 
 ### 补充后果
 
-- 任何冲突都不会再让「创建」变成只会复读同一句错误的控件；用户下一次点击提交的是当时的选择。
+- 任何 `transaction_conflict` 都不会再让「创建」变成只会复读同一句错误的控件；用户下一次点击提交的是当时的选择。文案随之更正为「该记录已作废，再点『创建』会按当前选择重新开始」——原文案说「已保留原请求」，那正是本修订删掉的行为。
+- 措辞的边界：没有 `txState` 的拒绝（例如重放解析之前的 403 `workspace not authorized`）仍然保留记录。那种拒绝可能是暂时的，重放同一条事务才是唯一安全的收敛方式，它不属于「宿主永远不会接受」这一类。
 - 一次冲突之后可能多出一个兄弟检出：它在侧栏可见、可正常归档，宿主侧的收据仍是它自己那条事务的凭证。

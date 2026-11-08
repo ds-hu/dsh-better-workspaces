@@ -28,7 +28,7 @@ mkdirSync(process.env.DSH_HOME, { recursive: true });
 const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, withBackgroundGitLane, currentGitLane, statusProbe, currentBranchInfo, listCommits, unpushedShas } = await import('../lib/git.js');
 const { createLane } = await import('../lib/lane.js');
 const { detectRepoCached, resetDiscoveryCache, setDiscoveryClock } = await import('../lib/discovery.js');
-const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, findWorktreeCreation, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../lib/worktree.js');
+const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, findWorktreeCreation, validateManagedCheckout, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../lib/worktree.js');
 const { computeDiff, commitDiff } = await import('../lib/diff.js');
 const { commitAction, pullAction, pushAction, discardAction, updateFromBaseAction, createPrAction, buildActionLadder } = await import('../lib/actions.js');
 const { createGitStateHub } = await import('../lib/state.js');
@@ -2287,21 +2287,52 @@ await test('a committed receipt stays replayable after its checkout switches bra
     });
     const committed = await findWorktreeCreation(driftRepo, txId, fingerprint);
     assert.equal(committed.status, 'committed', 'a finished creation replays before anything else happens');
+    const hub = createGitStateHub({ emit: () => {} });
+    try {
+      const before = await hub.snapshotFor(created.path, { fresh: true });
+      assert.equal(before.managed, true);
 
-    /* Work inside the checkout is free to rename or switch its branch — that is
-       what a Session does there. The receipt plus the worktree's own creation
-       metadata still prove WHICH transaction created this checkout, so a moved
-       branch is not "the target was replaced": reporting conflict here answered
-       409 to every replay of that txId forever, and the client's convergence rule
-       resubmits the same txId on every Create, so the launcher could never create
-       anything again — not even under a new branch name. */
-    git(created.path, 'checkout', '-b', 'drift-continued');
-    const drifted = await findWorktreeCreation(driftRepo, txId, fingerprint);
-    assert.equal(drifted.status, 'committed', 'a branch switched inside the checkout keeps its receipt replayable');
-    assert.equal(drifted.result.path, created.path);
-    assert.equal(drifted.result.branch, 'drift-original', 'the replay answers with the branch the transaction created');
-    assert.equal(git(created.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'drift-continued',
-      'the fixture really did move the branch');
+      /* Work inside the checkout is free to rename or switch its branch — that
+         is what a Session does there. The receipt plus the worktree's own
+         creation metadata still prove WHICH transaction created this checkout, so
+         a moved branch is not "the target was replaced": reporting conflict here
+         answered 409 to every replay of that txId forever, and the client's
+         convergence rule resubmits the same txId on every Create, so the
+         launcher could never create anything again — not even under a new branch
+         name. */
+      git(created.path, 'checkout', '-b', 'drift-continued');
+      const drifted = await findWorktreeCreation(driftRepo, txId, fingerprint);
+      assert.equal(drifted.status, 'committed', 'a branch switched inside the checkout keeps its receipt replayable');
+      assert.equal(drifted.result.path, created.path);
+      assert.equal(drifted.result.branch, 'drift-continued',
+        'the replay answers for the checkout as it is now: a Workspace title is built from this field');
+      assert.equal(git(created.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'drift-continued',
+        'the fixture really did move the branch');
+
+      /* Drift is a normal state, so nothing else may call the checkout unknown:
+         the snapshot flag the action ladder reads, the worktree list the sidebar
+         reads, and archive itself. Only a decision that needs exact evidence —
+         crashed-journal recovery, a creation's own post-condition — still asks
+         for a matching branch. */
+      const after = await hub.snapshotFor(created.path, { fresh: true });
+      assert.equal(after.managed, true, 'a drifted checkout is still a managed worktree in the snapshot');
+      assert.equal(after.branch, 'drift-continued');
+      const archiveGuard = buildActionLadder(after).find((entry) => entry.id === 'archive');
+      assert.equal(archiveGuard.disabled, false, 'Archive stays available, so the product can clean it up');
+      const listed = (await listManagedWorktrees(driftRepo)).items.find((item) => item.path === created.path);
+      assert.equal(listed?.managed, true, 'and the sidebar keeps its branch identity');
+      const strict = await validateManagedWorktree(created.path, { expectedMainRoot: driftRepo });
+      assert.equal(strict.ok, false);
+      assert.equal(strict.reason, 'metadata-git-branch-mismatch', 'the exact form still reports the drift');
+      const identity = await validateManagedCheckout(created.path, { expectedMainRoot: driftRepo });
+      assert.equal(identity.ok, true);
+      assert.equal(identity.actualBranch, 'drift-continued');
+      const archived = await archiveWorktree(created.path, { force: true });
+      assert.equal(archived.ok, true, 'and the drifted checkout archives under the branch it is on');
+      assert.equal(existsSync(created.path), false);
+    } finally {
+      await hub.dispose();
+    }
 
     /* The fingerprint is still the identity proof: one txId may never describe a
        second request. */
@@ -3500,13 +3531,20 @@ await test('cleanup abandoned sweep: unreferenced+old only', async () => {
   const wtOld = await createWorktree({ repoRoot: repo, intent: 'branch-off', slug: 'abandon-old-0001' });
   const wtFresh = await createWorktree({ repoRoot: repo, intent: 'branch-off', slug: 'abandon-fresh-0002' });
   const wtBusy = await createWorktree({ repoRoot: repo, intent: 'branch-off', slug: 'abandon-busy-0003' });
+  // A checkout whose branch was renamed after creation is still an abandoned
+  // candidate — and the report names the branch it is on, not the one it was
+  // created with. Refusing it here used to report an ownership error on every
+  // sweep and leak the checkout forever.
+  const wtDrift = await createWorktree({ repoRoot: repo, intent: 'branch-off', slug: 'abandon-drift-0004' });
+  git(wtDrift.path, 'checkout', '-b', 'abandon-drift-renamed');
   wsEntities.push(
     { path: wtOld.path, workspaceId: 'ws-abandon-old-0001' },
     { path: wtFresh.path, workspaceId: 'ws-abandon-fresh-0002' },
     { path: wtBusy.path, workspaceId: 'ws-abandon-busy-0003' },
+    { path: wtDrift.path, workspaceId: 'ws-abandon-drift-0004' },
   );
   const aged = Date.now() - 3600000;
-  for (const target of [wtOld.path, wtBusy.path]) await patchMetadata(target, (m) => ({ ...m, createdAt: aged }));
+  for (const target of [wtOld.path, wtBusy.path, wtDrift.path]) await patchMetadata(target, (m) => ({ ...m, createdAt: aged }));
   const byId = {
     s2: { header: { cwd: wtFresh.path }, blank: true },
     s3: { header: { cwd: wtBusy.path }, blank: false },
@@ -3514,10 +3552,14 @@ await test('cleanup abandoned sweep: unreferenced+old only', async () => {
   const report = await createCleanup(mkCtx(byId))({ abandoned: true, minAgeMs: 60000 });
   assert.equal(report.ok, true, JSON.stringify(report));
   assert.ok(report.archived.some((a) => a.path === wtOld.path), JSON.stringify(report));
+  assert.ok(report.archived.some((a) => a.path === wtDrift.path && a.branch === 'abandon-drift-renamed'),
+    'a drifted checkout is swept, reported under the branch it is on: ' + JSON.stringify(report.archived));
   assert.ok(report.workspacesDeleted.includes('ws-abandon-old-0001'), JSON.stringify(report.workspacesDeleted));
+  assert.ok(report.workspacesDeleted.includes('ws-abandon-drift-0004'), JSON.stringify(report.workspacesDeleted));
   assert.ok(report.skipped.some((s) => s.path === wtFresh.path && s.reason === 'young'));
   assert.ok(report.skipped.some((s) => s.path === wtBusy.path && s.reason === 'session'));
   assert.ok(!existsSync(wtOld.path));
+  assert.ok(!existsSync(wtDrift.path));
   assert.ok(existsSync(wtFresh.path) && existsSync(wtBusy.path));
 
   const abandonedRaceRepo = join(scratch, 'cleanup-abandoned-race-repo');
