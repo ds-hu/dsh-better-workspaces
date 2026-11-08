@@ -1328,6 +1328,31 @@ assert.equal(
 assert.equal(T.createFailureText({ error: 'boom', message: 'boom' }, (key, params) => key + (params ? ':' + params.message : '')),
   'hero.failed:boom', 'an unknown code keeps the raw message as the fallback');
 
+/* A refusal the Host will answer the same way forever must release the stored
+   transaction. Convergence resubmits the SAME txId on every Create, so a record
+   kept after one unlucky creation turns the launcher into a control that can
+   never create anything again — and the branch name the user types never
+   travels, which is what makes it look like "the name does not matter". */
+const conflictedTx = T.heroCreationRequest('source-conflict', { cwd: '/a', branchName: 'one' }, () => ({ branchName: 'one' }));
+assert.equal(T.releaseCreationTxOnFailure('source-conflict', conflictedTx.txId, { error: 'transaction_conflict' }), true,
+  'a conflict is released');
+const afterConflict = T.heroCreationRequest('source-conflict', { cwd: '/a', branchName: 'two' }, () => ({ branchName: 'two' }));
+assert.notEqual(afterConflict.txId, conflictedTx.txId, 'a conflicting transaction is dropped, not replayed');
+assert.deepEqual(afterConflict.body, { branchName: 'two' }, 'the next attempt submits what is now selected');
+T.clearHeroCreationTx('source-conflict', afterConflict.txId);
+
+const pendingTx = T.heroCreationRequest('source-pending', { cwd: '/a' }, () => ({ branchName: 'p' }));
+assert.equal(T.releaseCreationTxOnFailure('source-pending', pendingTx.txId, { error: 'transaction_pending' }), false,
+  'a transaction still in flight is never dropped');
+assert.equal(T.heroCreationRequest('source-pending', { cwd: '/a', branchName: 'changed' }, () => ({ branchName: 'changed' })).txId,
+  pendingTx.txId, 'an in-flight transaction keeps its txId and its body');
+T.clearHeroCreationTx('source-pending', pendingTx.txId);
+
+assert.equal(T.releaseCreationTxOnFailure('source-retired', 'tx-retired-0001', { txState: 'retired' }), true);
+assert.equal(T.releaseCreationTxOnFailure('source-absent', 'tx-absent-0001', { txState: 'absent' }), true);
+assert.equal(T.releaseCreationTxOnFailure('source-unknown', 'tx-unknown-0001', { error: 'boom', message: 'boom' }), false,
+  'an unrecognised refusal keeps the record, so a retry is still the same transaction');
+
 const persistedA = T.heroCreationRequest('source-tx', { cwd: '/a', base: 'main', branchName: 'fix-login' }, () => ({ branchName: 'fix-login', base: 'main' }));
 const persistedB = T.heroCreationRequest('source-tx', { cwd: '/a', base: 'main', branchName: 'fix-login' }, () => ({ branchName: 'clobber', base: 'main' }));
 assert.equal(persistedB.txId, persistedA.txId);

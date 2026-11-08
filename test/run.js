@@ -28,7 +28,7 @@ mkdirSync(process.env.DSH_HOME, { recursive: true });
 const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, withBackgroundGitLane, currentGitLane, statusProbe, currentBranchInfo, listCommits, unpushedShas } = await import('../lib/git.js');
 const { createLane } = await import('../lib/lane.js');
 const { detectRepoCached, resetDiscoveryCache, setDiscoveryClock } = await import('../lib/discovery.js');
-const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../lib/worktree.js');
+const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, findWorktreeCreation, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../lib/worktree.js');
 const { computeDiff, commitDiff } = await import('../lib/diff.js');
 const { commitAction, pullAction, pushAction, discardAction, updateFromBaseAction, createPrAction, buildActionLadder } = await import('../lib/actions.js');
 const { createGitStateHub } = await import('../lib/state.js');
@@ -2256,6 +2256,63 @@ await test('creation source claim is a per-launcher lease, not a permanent lock'
     claimWorktreeCreationSource(leaseRepo, source, 'lease-tx-000000000005', fingerprint),
     (error) => error.code === 'WORKTREE_SOURCE_CONFLICT');
   rmSync(claimFile, { force: true });
+});
+
+await test('a committed receipt stays replayable after its checkout switches branch', async () => {
+  const driftRepo = join(scratch, 'receipt-branch-drift-repo');
+  mkdirSync(driftRepo);
+  gitInit(driftRepo, '-b', 'main');
+  git(driftRepo, 'config', 'user.email', 'test@dsh.local');
+  git(driftRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(driftRepo, 'base.txt'), 'base\n');
+  git(driftRepo, 'add', '-A');
+  git(driftRepo, 'commit', '-m', 'base');
+
+  const txId = 'receipt-drift-tx-0001';
+  const fingerprint = 'e'.repeat(64);
+  let created = null;
+  try {
+    created = await createWorktree({
+      repoRoot: driftRepo,
+      intent: 'branch-off',
+      branchName: 'drift-original',
+      slug: 'drift-original',
+      creationTxId: txId,
+      creationFingerprint: fingerprint,
+    });
+    await commitWorktreeCreationReceipt(driftRepo, txId, fingerprint, {
+      path: created.path,
+      branch: created.branch,
+      workspaceId: 'ws-receipt-drift',
+    });
+    const committed = await findWorktreeCreation(driftRepo, txId, fingerprint);
+    assert.equal(committed.status, 'committed', 'a finished creation replays before anything else happens');
+
+    /* Work inside the checkout is free to rename or switch its branch — that is
+       what a Session does there. The receipt plus the worktree's own creation
+       metadata still prove WHICH transaction created this checkout, so a moved
+       branch is not "the target was replaced": reporting conflict here answered
+       409 to every replay of that txId forever, and the client's convergence rule
+       resubmits the same txId on every Create, so the launcher could never create
+       anything again — not even under a new branch name. */
+    git(created.path, 'checkout', '-b', 'drift-continued');
+    const drifted = await findWorktreeCreation(driftRepo, txId, fingerprint);
+    assert.equal(drifted.status, 'committed', 'a branch switched inside the checkout keeps its receipt replayable');
+    assert.equal(drifted.result.path, created.path);
+    assert.equal(drifted.result.branch, 'drift-original', 'the replay answers with the branch the transaction created');
+    assert.equal(git(created.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'drift-continued',
+      'the fixture really did move the branch');
+
+    /* The fingerprint is still the identity proof: one txId may never describe a
+       second request. */
+    const other = await findWorktreeCreation(driftRepo, txId, 'f'.repeat(64));
+    assert.equal(other.status, 'conflict');
+    assert.equal(other.reason, 'transaction-receipt-mismatch');
+  } finally {
+    // The abandoned sweep walks every managed root: a fixture left switched onto
+    // another branch would be reported by the next test as a leak.
+    if (created) await archiveWorktree(created.path, { force: true }).catch(() => {});
+  }
 });
 
 await test('api creation adopts a managed root that predates the owner record', async () => {

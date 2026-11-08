@@ -591,6 +591,26 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
     assert.ok(scenario.record(), 'so the same txId can be replayed');
     await scenario.cleanup();
   }
+
+  // A CONFLICT is the one refusal the Host will answer identically forever: it
+  // keeps the original transaction of that txId, so replaying it reproduces the
+  // 409 and the branch name in the form never travels. Keeping the record made
+  // Create a control that could only ever repeat this error; dropping it lets
+  // the next click submit what is now selected.
+  {
+    const scenario = await heroCreateScenario({
+      postResponse: { ok: false, error: 'transaction_conflict', txId: 'tx-conflict-0000000001' },
+    });
+    await scenario.settle(60);
+    assert.equal(scenario.errorText(), 'hero.txConflict', 'the refusal is still reported, once');
+    assert.equal(scenario.record(), null, 'the refused transaction is dropped, not kept for replay');
+    await scenario.clickCreate();
+    await scenario.settle(150);
+    assert.equal(scenario.calls.posts.length, 2, 'the next Create reaches the Host');
+    assert.notEqual(scenario.calls.posts[1].txId, scenario.calls.posts[0].txId,
+      'and it is a NEW transaction: the refused txId is never resubmitted');
+    await scenario.cleanup();
+  }
 }
 
 /* The real component, in the state that matters: a blank Session whose cwd
