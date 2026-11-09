@@ -2346,6 +2346,54 @@ await test('a committed receipt stays replayable after its checkout switches bra
   }
 });
 
+await test('a drifted checkout keeps its managed identity without a receipt', async () => {
+  const scanRepo = join(scratch, 'drifted-identity-repo');
+  mkdirSync(scanRepo);
+  gitInit(scanRepo, '-b', 'main');
+  git(scanRepo, 'config', 'user.email', 'test@dsh.local');
+  git(scanRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(scanRepo, 'base.txt'), 'base\n');
+  git(scanRepo, 'add', '-A');
+  git(scanRepo, 'commit', '-m', 'base');
+
+  const txId = 'drifted-identity-tx-0001';
+  const fingerprint = 'd'.repeat(64);
+  let created = null;
+  try {
+    // Deliberately NO receipt on disk: the resolver still has to recognise its
+    // own creation by scanning the checkouts' creationTxId metadata. Asked
+    // strictly, that scan skipped the drifted checkout and answered `absent` for
+    // a creation that succeeded — which lets a replay create a second worktree,
+    // the one outcome the resolver exists to prevent.
+    created = await createWorktree({
+      repoRoot: scanRepo,
+      intent: 'branch-off',
+      branchName: 'drifted-original',
+      slug: 'drifted-original',
+      creationTxId: txId,
+      creationFingerprint: fingerprint,
+    });
+    git(created.path, 'checkout', '-b', 'drifted-later');
+    const found = await findWorktreeCreation(scanRepo, txId, fingerprint);
+    assert.equal(found.status, 'committed', 'a receipt-less creation is found by its txId after the branch moved');
+    assert.equal(found.result.path, created.path);
+    assert.equal(found.result.branch, 'drifted-later');
+    assert.equal((await readMetadata(created.path)).branch, 'drifted-original',
+      'the fixture really did move the branch away from the recorded one');
+
+    // The same checkout must still authorize as OUR managed worktree: a strict
+    // answer classified it `linked-worktree`, which also made /detect say
+    // unmanaged and switched off the title self-heal and the task diff.
+    const authorizer = createWorkspaceAuthorizer({ workspaceRoots: () => [scanRepo] });
+    const auth = await authorizer.authorize(created.path, { fresh: true });
+    assert.equal(auth.ok, true, 'a drifted checkout is still authorized');
+    assert.equal(auth.kind, 'managed-worktree', 'and as this plugin\'s worktree, not a bare linked one');
+    assert.equal(auth.gitBoundary, 'root');
+  } finally {
+    if (created) await archiveWorktree(created.path, { force: true }).catch(() => {});
+  }
+});
+
 await test('api creation adopts a managed root that predates the owner record', async () => {
   const legacyRepo = join(scratch, 'legacy-root-repo');
   mkdirSync(legacyRepo);

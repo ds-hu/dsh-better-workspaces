@@ -83,6 +83,7 @@ owner record 是本 ADR 引入的（提交 `6e509f2`，2026-09-11）。在此之
 - 升级后首次在某仓库创建 worktree 会自动认领其遗留受管根，无需人工补写 owner record；已存在的 worktree 与元数据不受影响。
 - 解析与认领的职责分离被显式化：只读解析器不再承担引导，引导必须发生在持有仓库 mutation gate 的写路径上。
 - 若仓库路径被真正替换（dev/inode 变化），行为与 Amendment 2 一致：拒绝，不认领。
+
 ## Amendment 4（2026-11-08）：已提交收据的重放不要求检出仍在创建时的分支
 
 ### 新背景
@@ -100,12 +101,13 @@ owner record 是本 ADR 引入的（提交 `6e509f2`，2026-09-11）。在此之
    - 装配现状：清理的**候选循环**今天到不了——插件以 `recoveryOnly: true` 构造清理，进程内定时任务传 `abandoned: true, automatic: true`，HTTP 路由不传 `abandoned`。因此本条描述的是「将来打开 sweep 时必须成立」，不是今天就生效的行为；本修订早先的注释与后果把「每轮 sweep 报 ownership 错误」当作既成事实，那是错的。
 4. 重放的回答描述检出的**当前**状态：`result.branch` 取 `actualBranch`，否则退回创建时记录的分支。后者只在 detached HEAD 时出现（worktree 列表行的 `branch` 为 `null`），那时「当前分支」没有名字，退回记录的旧名只是可显示值，不承诺它就是 HEAD。
 5. 同 tx 不同指纹仍然冲突（回到 Amendment 1 的规则），回归测试固定这一点。
-6. 改了 `worktreesDir`（ADR 0017）之后，旧基目录下的检出不再属于受管根，收据重放得到 `transaction-receipt-mismatch`。这是**有意的**：插件不认领当前基目录之外的检出，那个检出原地保留、分支完好，由 ADR 0017 的 stranded 提示负责让人看见；释放后新建的那一个落在新基目录，不是重复创建。
+6. 改了 `worktreesDir`（ADR 0017）之后，收据文件本身也随基目录走：旧收据留在旧基目录，新基目录里根本读不到它，所以重放得到的是 **`absent`**，而不是 `transaction-receipt-mismatch`（后者要求收据被读到、路径却落在受管根之外）。这是**有意的**：插件不认领当前基目录之外的检出，旧检出原地保留、分支完好，由 ADR 0017 的 stranded 提示负责让人看见；一次带同一 txId 的创建请求于是会在新基目录下建出第二个检出（并排），而不是复用旧的。
 
 ### 补充后果
 
 - 一个创建后又被切了分支的 worktree，现在重放为 `committed`，客户端拿到原收据里的 path/workspaceId 继续交接，不再被锁死；回答里的分支名是它现在所在的分支。
-- 漂移的检出在产品里不再是「未知检出」：Archive 可用、侧栏保留分支图标、`authorize` 仍判为 `managed-worktree`、`/detect` 仍报 `managed`，标题自愈与任务 diff 因此恢复。
+- 漂移的检出在产品里不再是「未知检出」：动作阶梯的 Archive 恢复可用、侧栏保留分支图标、`authorize` 仍判为 `managed-worktree`、`/detect` 仍报 `managed`，标题自愈与任务 diff 因此恢复。（物理归档接口仍按 ADR 0016 失败关闭——那是既有的会话租约缺口，与本次判定无关。）
+- 读路径一致也意味着 PR 来源信任随之成立：`pullIdentityTrusted` 现在对一个「创建自 PR、之后又被切到别的分支」的检出也为真，因此合并、关闭自动合并等远程动作与 PR 徽章对它仍可用。这不是新增权限——那些动作本来就要求用户点击、并用 `gh` 的既有身份——而是「漂移不是身份」这条规则在读路径上的直接后果；本修订之前，它会被当作普通 worktree 而静默关掉这些能力。
 - 自动 sweep 对它仍然拒绝并报告（决策 3）。这条只有在将来解除 `recoveryOnly` 之后才会被观察到。
 - 收据指向的检出若真的被替换或不可读，仍按原样 conflict（`transaction-target-replaced` / `transaction-target-unreadable`）。
 - 客户端在冲突时释放事务记录（ADR 0016 Amendment 1），与此处的放宽互为兜底：两侧都不会再产生永久锁。
