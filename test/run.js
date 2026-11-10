@@ -25,7 +25,7 @@ const scratch = mkdtempSync(join(scratchRoot, 'dsh-bw-test-'));
 process.env.DSH_HOME = join(scratch, 'dshhome');
 mkdirSync(process.env.DSH_HOME, { recursive: true });
 
-const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, withBackgroundGitLane, currentGitLane, statusProbe, currentBranchInfo, listCommits, unpushedShas } = await import('../lib/git.js');
+const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, withBackgroundGitLane, currentGitLane, statusProbe, currentBranchInfo, headState, listCommits, unpushedShas } = await import('../lib/git.js');
 const { createLane } = await import('../lib/lane.js');
 const { detectRepoCached, resetDiscoveryCache, setDiscoveryClock } = await import('../lib/discovery.js');
 const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, findWorktreeCreation, validateManagedCheckout, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../lib/worktree.js');
@@ -2893,6 +2893,12 @@ if [ "$FAKE_GH_PULLS_FAIL" = "1" ] && [ "$1 $2" = "pr list" ]; then
   exit 1
 fi
 
+# slow PR lookups: proves the git half of a snapshot is not held back by the
+# forge round trip (ADR 0018, amendment 2)
+if [ "$FAKE_GH_SLOW_PR" = "1" ] && [ "$1 $2" = "api --hostname" ]; then
+  sleep 0.4
+fi
+
 case "$1 $2" in
   "auth status")
     echo "github.com"
@@ -3902,6 +3908,197 @@ await test('worktreesDir inside the main checkout is refused before it is create
     assert.equal(existsSync(nested), false, 'the refusal happens before the base directory is created inside the repo');
   } finally {
     configureWorktreesBaseDir(null);
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * snapshot caching + split emit (ADR 0018, amendments 1-3)
+ * ------------------------------------------------------------------ */
+
+await test('diffStat reuses the head/status a compute already read', async () => {
+  const dsRepo = join(scratch, 'diffstat-reuse');
+  mkdirSync(dsRepo);
+  gitInit(dsRepo, '-b', 'main');
+  git(dsRepo, 'config', 'user.email', 'test@dsh.local');
+  git(dsRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(dsRepo, 'a.txt'), 'alpha\n');
+  git(dsRepo, 'add', '-A');
+  git(dsRepo, 'commit', '-m', 'initial');
+  writeFileSync(join(dsRepo, 'b.txt'), 'one\ntwo\nthree\n'); // untracked
+  try {
+    const plain = await diffStat(dsRepo, 'main');
+    assert.equal(plain.ok, true);
+    assert.equal(plain.additions, 3, 'the untracked lines are counted');
+    const status = await porcelainStatus(dsRepo);
+    const head = await headState(dsRepo);
+    const reused = await diffStat(dsRepo, 'main', { status, head });
+    assert.deepEqual(reused, plain, 'the handed-in facts produce the same answer');
+    // The supplied status is really the one used: with no untracked entries the
+    // untracked scan cannot invent the three lines.
+    const blind = await diffStat(dsRepo, 'main', { status: { ok: true, entries: [] }, head });
+    assert.equal(blind.ok, true);
+    assert.equal(blind.additions, 0, 'the caller-supplied status is authoritative');
+    // ...and so is the supplied HEAD half: a failed one must short-circuit
+    // instead of spawning its own probe.
+    const noHead = await diffStat(dsRepo, 'main', { head: { ok: false, error: 'supplied-head-failure' } });
+    assert.equal(noHead.ok, false, 'the caller-supplied HEAD verdict is authoritative');
+    assert.equal(noHead.error, 'supplied-head-failure');
+  } finally {
+    rmSync(dsRepo, { recursive: true, force: true });
+  }
+});
+
+await test('the authorizer memoizes resolved roots and accepts a shared list', async () => {
+  const memoRepo = join(scratch, 'memo-repo');
+  mkdirSync(memoRepo);
+  gitInit(memoRepo, '-b', 'main');
+  git(memoRepo, 'config', 'user.email', 'test@dsh.local');
+  git(memoRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(memoRepo, 'a.txt'), 'alpha\n');
+  git(memoRepo, 'add', '-A');
+  git(memoRepo, 'commit', '-m', 'initial');
+  try {
+    const authorizer = createWorkspaceAuthorizer({ workspaceRoots: () => [memoRepo] });
+    const first = await authorizer.registeredRoots();
+    const second = await authorizer.registeredRoots();
+    assert.equal(first, second, 'the resolved list is reused while the registry snapshot is unchanged');
+    const fresh = await authorizer.registeredRoots({ fresh: true });
+    assert.notEqual(fresh, first, 'the fresh path re-resolves, so a mutation never reads the memo');
+    assert.deepEqual(fresh, first, 'and reaches the same answer');
+
+    // An explicit roots list (one per batch) skips the provider entirely: that
+    // is what makes a 37-selector page load cost one registry read, not 37.
+    let providerCalls = 0;
+    const batchAuthorizer = createWorkspaceAuthorizer({
+      workspaceRoots: () => { providerCalls += 1; return []; },
+    });
+    const authorized = await batchAuthorizer.authorize(memoRepo, { roots: first });
+    assert.equal(authorized.ok, true, 'an explicit roots list authorizes a registered root');
+    assert.equal(providerCalls, 0, 'the provider is not consulted when the batch already resolved the roots');
+  } finally {
+    rmSync(memoRepo, { recursive: true, force: true });
+  }
+});
+
+await test('a pruned target answers its last snapshot while the recompute runs', async () => {
+  const keepRepo = join(scratch, 'keep-repo');
+  mkdirSync(keepRepo);
+  gitInit(keepRepo, '-b', 'main');
+  git(keepRepo, 'config', 'user.email', 'test@dsh.local');
+  git(keepRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(keepRepo, 'a.txt'), 'alpha\n');
+  git(keepRepo, 'add', '-A');
+  git(keepRepo, 'commit', '-m', 'initial');
+  const authorizer = createWorkspaceAuthorizer({ workspaceRoots: () => [keepRepo] });
+  const hub = createGitStateHub({
+    authorizeTarget: (cwd) => authorizer.authorize(cwd),
+    // Test seams: production prunes on a three-minute timer against a live
+    // `lastAccess`, and a cold compute on CI (especially Windows) can outlast
+    // any small window. Drive the boundary explicitly instead of racing it.
+    targetTtlMs: 0,
+    pruneIntervalMs: 600000,
+    lastKnownTtlMs: 60000,
+  });
+  try {
+    const computed = await hub.snapshotFor(keepRepo);
+    assert.equal(computed.branch, 'main');
+    assert.equal(hub.stats().lastKnown, 0, 'nothing is retained while the target is live');
+    hub.pruneNow();
+    assert.equal(hub.stats().targets, 0, 'the idle target was pruned');
+    assert.equal(hub.stats().lastKnown, 1, 'its last snapshot was retained');
+    assert.equal(hub.peek(keepRepo), null, 'the live cache is empty again');
+
+    const reopened = await hub.snapshotsFast([keepRepo]);
+    assert.equal(reopened.byCwd[keepRepo]?.branch, 'main', 'the retained snapshot is answered immediately');
+    assert.equal(reopened.byCwd[keepRepo]?.isGit, true);
+    assert.deepEqual(reopened.pending, [keepRepo], 'and the recompute that supersedes it is already scheduled');
+
+    // Let the scheduled recompute finish before mutating the checkout (a
+    // concurrent `git status` could hold the index lock), then prove it
+    // supersedes the retained answer.
+    await hub.snapshotFor(keepRepo);
+    git(keepRepo, 'checkout', '-b', 'after-reopen');
+    const superseded = await hub.snapshotFor(keepRepo, { fresh: true });
+    assert.equal(superseded.branch, 'after-reopen', 'the fresh compute is the authority');
+  } finally {
+    await hub.dispose();
+    // recursive watch children close on the next ticks, not synchronously
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    rmSync(keepRepo, { recursive: true, force: true });
+  }
+});
+
+await test('a replaced checkout does not inherit the retained snapshot', async () => {
+  const swapRepo = join(scratch, 'swap-repo');
+  mkdirSync(swapRepo);
+  gitInit(swapRepo, '-b', 'main');
+  git(swapRepo, 'config', 'user.email', 'test@dsh.local');
+  git(swapRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(swapRepo, 'a.txt'), 'alpha\n');
+  git(swapRepo, 'add', '-A');
+  git(swapRepo, 'commit', '-m', 'initial');
+  const authorizer = createWorkspaceAuthorizer({ workspaceRoots: () => [swapRepo] });
+  const hub = createGitStateHub({
+    authorizeTarget: (cwd) => authorizer.authorize(cwd),
+    targetTtlMs: 0,
+    pruneIntervalMs: 600000,
+  });
+  try {
+    await hub.snapshotFor(swapRepo);
+    hub.pruneNow();
+    assert.equal(hub.stats().targets, 0, 'the target was pruned');
+    assert.equal(hub.stats().lastKnown, 1);
+    // Same spelling, different directory: the dev/ino proof is the whole safety
+    // argument for serving a retained answer.
+    rmSync(swapRepo, { recursive: true, force: true });
+    mkdirSync(swapRepo);
+    const reopened = await hub.snapshotsFast([swapRepo]);
+    assert.equal(Object.hasOwn(reopened.byCwd, swapRepo), false,
+      'a replaced checkout is "nothing known", not the previous repository\'s branch');
+    assert.deepEqual(reopened.pending, [swapRepo]);
+  } finally {
+    await hub.dispose();
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    rmSync(swapRepo, { recursive: true, force: true });
+  }
+});
+
+await test('the git half of a snapshot is emitted before the forge round trip', async () => {
+  if (FAKE_GH_POSIX_ONLY) return skipped(FAKE_GH_POSIX_ONLY);
+  const splitRepo = join(scratch, 'split-repo');
+  mkdirSync(splitRepo);
+  gitInit(splitRepo, '-b', 'main');
+  git(splitRepo, 'config', 'user.email', 'test@dsh.local');
+  git(splitRepo, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(splitRepo, 'a.txt'), 'alpha\n');
+  git(splitRepo, 'add', '-A');
+  git(splitRepo, 'commit', '-m', 'initial');
+  git(splitRepo, 'remote', 'add', 'origin', 'https://github.com/acme/widget.git');
+  invalidateGhAuth();
+  const emitted = [];
+  const hub = createGitStateHub({ onChange: (snapshot) => emitted.push({ snapshot, at: Date.now() }) });
+  process.env.FAKE_GH_SLOW_PR = '1';
+  try {
+    const final = await hub.snapshotFor(splitRepo, { fresh: true });
+    assert.ok(emitted.length >= 2, `two frames — git half, then forge half (saw ${emitted.length})`);
+    const first = emitted[0].snapshot;
+    assert.equal(first.branch, 'main', 'the first frame already carries the branch');
+    assert.equal(first.forgeAuth, 'pending', 'the first frame says the forge half is still pending');
+    assert.equal(first.pr, null, 'no PR in the first frame');
+    assert.equal(first.diffStat !== null, true, 'the first frame already carries the DiffStat');
+    const last = emitted[emitted.length - 1].snapshot;
+    assert.ok(last.at >= first.at, 'the frames are ordered');
+    assert.ok(emitted[emitted.length - 1].at - emitted[0].at >= 250,
+      'the forge half landed a round trip after the git half, not before it');
+    assert.equal(final.forgeAuth, 'ok', 'the final snapshot carries the forge answer');
+    assert.equal(final.pr && final.pr.number, 12, 'and the PR it found');
+    assert.equal(hub.peek(splitRepo).forgeAuth, 'ok', 'the stored snapshot is the final one');
+    assert.equal(hub.peek(splitRepo).pr.number, 12);
+  } finally {
+    delete process.env.FAKE_GH_SLOW_PR;
+    await hub.dispose();
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    rmSync(splitRepo, { recursive: true, force: true });
   }
 });
 

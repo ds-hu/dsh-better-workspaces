@@ -22,11 +22,11 @@ Renseignez un nom de branche ou générez-en un d'un clic grâce au dé. Choisis
 
 ![Formulaire worktree avec nom de branche, choix de la base et bouton Create](docs/screenshots/02-worktree-form.png)
 
-### 3. Suivi de l'état Git au niveau de chaque session
+### 3. Suivi de l'état Git au niveau de chaque espace de travail
 
-Sous le titre de chaque session dans la barre latérale, retrouvez la branche active et le volume de changements (`+11 −3`). Les statuts de pull request et de CI s'affichent sur la même ligne : inutile d'exécuter `git status` en ligne de commande.
+Sous le titre de chaque espace de travail dans la barre latérale, retrouvez la branche active et le volume de changements (`+11 −3`) de son arbre de travail — une seule ligne par espace, sans répétition sur chaque session. Les statuts de pull request et de CI s'affichent sur la même ligne : inutile d'exécuter `git status` en ligne de commande. Le dernier état connu est mémorisé : rouvrir l'interface l'affiche aussitôt, puis le corrige un instant plus tard.
 
-![Ligne de session avec branche et taille du diff](docs/screenshots/03-sidebar-badges.png)
+![Lignes d'espaces de travail avec branche et taille du diff](docs/screenshots/03-sidebar-badges.png)
 
 ### 4. Revue intégrale des diffs dans le volet latéral
 

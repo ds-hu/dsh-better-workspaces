@@ -22,11 +22,11 @@ Enter a branch name or click the dice to generate one. Base your worktree on any
 
 ![Worktree form with branch name, base picker, and Create button](docs/screenshots/02-worktree-form.png)
 
-### 3. Session status and diff size at a glance
+### 3. Workspace status and diff size at a glance
 
-Every session card in the sidebar displays its active branch and diff volume (`+11 −3`). When a pull request is open or CI checks are running, their status joins the same row—no need to run `git status` in the terminal.
+Each workspace row in the sidebar shows the active branch and diff volume (`+11 −3`) of the checkout it owns—once per workspace, so sessions inside it no longer repeat the same line. When a pull request is open or CI checks are running, their status joins the same line—no need to run `git status` in the terminal. The last known state is kept across page loads, so reopening the GUI shows the line immediately and corrects it a moment later.
 
-![Session row showing branch and diff size](docs/screenshots/03-sidebar-badges.png)
+![Workspace rows showing branch and diff size](docs/screenshots/03-sidebar-badges.png)
 
 ### 4. Full-page diff review in the sidebar
 

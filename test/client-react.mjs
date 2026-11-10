@@ -825,29 +825,62 @@ assert.equal(requestSignal?.aborted, true, 'unmount aborts the picker request ow
 assert.equal(document.activeElement, prior, 'unmount restores the previously focused element');
 container.remove();
 
-/* ---------------- sidebar badge row vs the late-mounted time cell ---------------- */
-/* A blank session row renders only slot+title: DSH gates `.time`, the pin marker
-   and `.rowActions` on `!row.blank`, so they mount only after the first message.
-   React appends those freshly mounted cells at the row's actual end — behind the
-   badge container the injector appended earlier — which made the 100%-wide badge
-   row own the first line and pushed the timestamp onto the next line at the
-   content start. The fix is two-part: the badge rule carries `order: 1` so the
-   visual line cannot depend on DOM order, and pass() moves the injected node
-   back so the DOM order agrees too. This drives the real apply() wiring. */
+/* ---------------- sidebar badge line: one per Workspace, under its title ---------------- *
+ * Git state is a fact about the checkout, so the line belongs to the Workspace
+ * row and is drawn once there instead of on every Session row inside it. The
+ * injector appends a real React root into the shipped title column
+ * (`_projectText`), which is a flex column: the line stacks under the title in
+ * flow, and React's own trailing cells (row actions) stay outside that column,
+ * which is why the old `order: 1` / late-mounted-time-cell dance is gone.
+ *
+ * This drives the real apply() wiring against the production row shape:
+ *   div._projectRow[data-row-key="workspace:<id>"]
+ *     span._slot._folder · span._slot._chevron
+ *     span._projectText > span._title
+ *     span._rowActions
+ * --------------------------------------------------------------------------------------- */
 const rowHost = document.createElement('div');
 document.body.appendChild(rowHost);
-function BlankableRow({ node, blank }) {
-  return React.createElement('div', { className: 'Rows_sessionRow__t bw-blank-row', 'data-session': node.id },
-    React.createElement('span', { className: 'Rows_slot__t' }),
-    React.createElement('span', { className: 'Rows_title__t' }, 'scratch'),
-    blank ? null : React.createElement('span', { className: 'Rows_time__t' }, '1h'),
-    blank ? null : React.createElement('span', { className: 'Rows_pinIndicator__t' }),
-    blank ? null : React.createElement('span', { className: 'Rows_rowActions__t' }),
+function WorkspaceRow({ node, round }) {
+  return React.createElement('div', {
+    className: 'Rows_projectRow__t bw-ws-row',
+    'data-row-key': `workspace:${node.workspaceId}`,
+  },
+    React.createElement('span', { className: 'Rows_slot__t Rows_folder__t' }),
+    React.createElement('span', { className: 'Rows_slot__t Rows_chevron__t' }),
+    // a changing key makes React replace the column node, which is the shape a
+    // re-render can actually produce
+    React.createElement('span', { className: 'Rows_projectText__t', key: `col-${round}` },
+      React.createElement('span', { className: 'Rows_title__t' }, node.title)),
+    React.createElement('span', { className: 'Rows_rowActions__t' }),
   );
 }
-function AnchorlessRow() {
-  return React.createElement('div', { className: 'Rows_sessionRow__t bw-anchorless-row' },
+function TitlelessRow() {
+  return React.createElement('div', { className: 'Rows_projectRow__t bw-anchorless-row', 'data-row-key': 'workspace:ws-unknown' },
+    React.createElement('span', { className: 'Rows_slot__t Rows_folder__t' }),
+  );
+}
+function UntaggedRow({ title }) {
+  // pre-`data-row-key` shells: only the title text identifies the row
+  return React.createElement('div', { className: 'Rows_projectRow__t bw-untagged-row' },
+    React.createElement('span', { className: 'Rows_slot__t Rows_folder__t' }),
+    React.createElement('span', { className: 'Rows_projectText__t' },
+      React.createElement('span', { className: 'Rows_title__t' }, title)),
+  );
+}
+function UngroupedRow({ title }) {
+  // the host's "Ungrouped" bucket is a project-shaped row with no Workspace id;
+  // its display text is localized and can collide with a Workspace title
+  return React.createElement('div', { className: 'Rows_projectRow__t bw-ungrouped-row', 'data-row-key': 'workspace:' },
+    React.createElement('span', { className: 'Rows_slot__t Rows_folder__t' }),
+    React.createElement('span', { className: 'Rows_projectText__t' },
+      React.createElement('span', { className: 'Rows_title__t' }, title)),
+  );
+}
+function SessionRow() {
+  return React.createElement('div', { className: 'Rows_sessionRow__t bw-session-row' },
     React.createElement('span', { className: 'Rows_slot__t' }),
+    React.createElement('span', { className: 'Rows_title__t' }, 'scratch'),
   );
 }
 
@@ -855,6 +888,19 @@ const appliedEffects = [];
 const sidebarSessions = {
   byId: { 'bw-regression-sess': { title: 'scratch' } },
   ids: ['bw-regression-sess'], current: 'bw-regression-sess', phase: 'ready',
+};
+/* Two Workspaces share the title `dupe`: a title-only row is ambiguous and must
+   stay empty rather than show another repository's branch. `ws-ungrouped-name`
+   exists so the ungrouped bucket's localized title collides with a real
+   Workspace title — the row key, not the text, must decide. */
+const rowWorkspaces = {
+  items: [
+    { workspaceId: 'ws-repo', title: 'repo', path: '/repo', sessionIds: ['bw-regression-sess'] },
+    { workspaceId: 'ws-plain', title: 'plain', path: '/plain', sessionIds: [] },
+    { workspaceId: 'ws-dupe-a', title: 'dupe', path: '/dupe-a', sessionIds: [] },
+    { workspaceId: 'ws-dupe-b', title: 'dupe', path: '/dupe-b', sessionIds: [] },
+    { workspaceId: 'ws-ungrouped-name', title: 'Ungrouped', path: '/ungrouped-name', sessionIds: [] },
+  ],
 };
 const rowSidebarRightTabs = { register: () => () => {} };
 const mockCtx = {
@@ -877,19 +923,57 @@ const mockCtx = {
   locale: { register: () => () => {}, bind: () => (key) => key },
   slots: { inject(_name, registerFn) { registerFn(); return () => {}; }, register: () => () => {} },
   sessions: { list: { getSnapshot: () => sidebarSessions, subscribe: () => () => {} } },
-  workspaces: { items: [], list: { subscribe: () => () => {} } },
+  workspaces: { items: rowWorkspaces.items, list: { subscribe: () => () => {} } },
 };
 
+const ROW_BRANCH = 'feat/workspace-badge-line';
+const CACHED_BRANCH = 'cached/from-last-visit';
+/* The persistent snapshot cache (ADR 0018, amendment 1): the previous visit's
+   answer must paint the line before this batch is answered, and the batch must
+   then replace it. Seeding it here is exactly what a reload does. */
+const SNAPSHOT_CACHE_KEY = mod.__bwTest.SNAPSHOT_CACHE_KEY;
+window.localStorage.setItem(SNAPSHOT_CACHE_KEY, JSON.stringify({
+  version: 1,
+  savedAt: Date.now() - 60000,
+  snapshots: {
+    '/repo': { cwd: '/repo', at: Date.now() - 60000, isGit: true, branch: CACHED_BRANCH, diffStat: { additions: 7, deletions: 2 } },
+    '/plain': { cwd: '/plain', at: Date.now() - 60000, isGit: false },
+  },
+  aliases: {},
+}));
 const previousFetch = window.fetch;
-window.fetch = async () => { throw new Error('offline: the row scenario has no host'); };
+window.fetch = async (url) => {
+  if (String(url).indexOf('/snapshots') !== -1) {
+    // A cold host answers the first batch only after a compute wave; the delay
+    // makes "painted from cache" observable instead of a race (the hydrate
+    // deadline must stay well below this).
+    await new Promise((resolve) => { setTimeout(resolve, 1200); });
+    return {
+      json: async () => ({
+        ok: true,
+        byCwd: {
+          '/repo': {
+            cwd: '/repo', at: Date.now(), isGit: true, mainRepoRoot: '/repo', branch: ROW_BRANCH,
+            diffStat: { additions: 3, deletions: 1 }, upstream: { ahead: 2, behind: 0 },
+          },
+        },
+      }),
+    };
+  }
+  throw new Error('offline: the row scenario has no host');
+};
 globalThis.fetch = window.fetch;
 const rowRoot = createRoot(rowHost);
-await act(async () => {
-  rowRoot.render(React.createElement(React.Fragment, null,
-    React.createElement(BlankableRow, { node: { id: 'bw-regression-sess' }, blank: true }),
-    React.createElement(AnchorlessRow),
-  ));
-});
+let rowRound = 0;
+const renderRows = () => rowRoot.render(React.createElement(React.Fragment, null,
+  React.createElement(WorkspaceRow, { node: { workspaceId: 'ws-repo', title: 'repo' }, round: rowRound }),
+  React.createElement(WorkspaceRow, { node: { workspaceId: 'ws-plain', title: 'plain' }, round: rowRound }),
+  React.createElement(UntaggedRow, { title: 'dupe' }),
+  React.createElement(TitlelessRow),
+  React.createElement(UngroupedRow, { title: 'Ungrouped' }),
+  React.createElement(SessionRow),
+));
+await act(async () => { renderRows(); });
 await act(async () => { mod.apply(mockCtx); });
 
 /* The diagnostic surface must exist while the plugin is mounted: it is the
@@ -898,7 +982,7 @@ await act(async () => { mod.apply(mockCtx); });
 {
   const hook = window.__dshBwDebug;
   assert.ok(hook, 'apply installs window.__dshBwDebug');
-  for (const name of ['sessions', 'workspaces', 'hero', 'probe', 'describeOnScreen']) {
+  for (const name of ['sessions', 'workspaces', 'hero', 'probe', 'describeOnScreen', 'badges']) {
     assert.equal(typeof hook[name], 'function', `__dshBwDebug.${name} is callable`);
   }
   // every reader must be total: a diagnostic that throws is worse than none
@@ -906,54 +990,120 @@ await act(async () => { mod.apply(mockCtx); });
   assert.doesNotThrow(() => hook.workspaces(), 'workspaces() is safe before any Workspace is seen');
   assert.doesNotThrow(() => hook.hero(), 'hero() is safe');
   assert.doesNotThrow(() => hook.probe(), 'probe() is safe');
+  assert.doesNotThrow(() => hook.badges(), 'badges() is safe');
   const onScreen = hook.describeOnScreen();
   assert.equal(typeof onScreen.rowFound, 'boolean', 'describeOnScreen reports the DOM verdict');
   assert.ok(Object.hasOwn(onScreen, 'source'), 'the resolution source is reported');
   assert.ok(Object.hasOwn(onScreen, 'resolvedCwd'), 'the resolved cwd is reported');
 }
 
-const blankRow = rowHost.querySelector('.bw-blank-row');
-const anchorlessRow = rowHost.querySelector('.bw-anchorless-row');
-assert.ok(blankRow && anchorlessRow, 'both session rows rendered');
-const badges = blankRow.querySelector('.dsh-bw-badges');
-assert.ok(badges, 'the injector appended a badge row to the session row');
+const workspaceRow = rowHost.querySelector('[data-row-key="workspace:ws-repo"]');
+const plainRow = rowHost.querySelector('[data-row-key="workspace:ws-plain"]');
+const untaggedRow = rowHost.querySelector('.bw-untagged-row');
+const titlelessRow = rowHost.querySelector('.bw-anchorless-row');
+const ungroupedRow = rowHost.querySelector('.bw-ungrouped-row');
+const sessionRow = rowHost.querySelector('.bw-session-row');
+assert.ok(workspaceRow && plainRow && untaggedRow && titlelessRow && ungroupedRow && sessionRow,
+  'every sidebar row shape rendered');
+
 /* DOM nodes are compared through cheap strings: assert.equal on two jsdom
    elements deep-inspects both on failure, which is what makes a failing run
    explode instead of reporting. */
-const lastChildClass = (row) => (row.lastElementChild ? row.lastElementChild.className : null);
-assert.equal(lastChildClass(blankRow), 'dsh-bw-badges', 'a blank row ends with the badge row');
-assert.ok(!anchorlessRow.querySelector('.dsh-bw-badges'),
-  'a row without the title anchor degrades without injecting');
+const columnOf = (row) => row.querySelector('[class*="_projectText"]');
+const linesOf = (root) => root.querySelectorAll('.dsh-bw-badges');
 
-/* First message: DSH mounts the trailing cells, React appends them behind the
-   injected node — reproduce that exact DOM before asserting the fix. */
+assert.equal(linesOf(workspaceRow).length, 1, 'the Workspace row carries exactly one badge line');
+assert.equal(linesOf(workspaceRow)[0].parentElement, columnOf(workspaceRow),
+  'the line lives inside the shipped title column, so it stacks under the title');
+assert.equal(linesOf(workspaceRow)[0].previousElementSibling, workspaceRow.querySelector('[class*="_title"]'),
+  'the line sits directly below the title, not behind the row actions');
+assert.equal(linesOf(sessionRow).length, 0,
+  'Session rows carry no badge line any more — the Workspace row owns it');
+assert.equal(linesOf(plainRow).length, 1, 'a non-git Workspace still gets its (empty) line holder');
+assert.equal(linesOf(plainRow)[0].childNodes.length, 0,
+  'a non-git Workspace leaves the holder empty, so the `:empty` rule keeps the row 34 px');
+assert.equal(linesOf(untaggedRow).length, 0,
+  'an ambiguous title (two Workspaces named "dupe") injects nothing rather than guessing');
+assert.equal(linesOf(titlelessRow).length, 0,
+  'a row without the title column degrades without injecting');
+assert.equal(linesOf(ungroupedRow).length, 0,
+  'the ungrouped bucket carries no row id, so a Workspace titled like it is never painted there');
+
+/* Before the first batch is answered (the mock sleeps 1200 ms), the line must
+   already show what the previous visit knew. This is the whole point of the
+   cache: a cold host no longer means a blank row. */
 await act(async () => {
-  rowRoot.render(React.createElement(React.Fragment, null,
-    React.createElement(BlankableRow, { node: { id: 'bw-regression-sess' }, blank: false }),
-    React.createElement(AnchorlessRow),
-  ));
+  const hydrateDeadline = Date.now() + 700;
+  while (!String(linesOf(workspaceRow)[0]?.textContent || '').includes(CACHED_BRANCH) && Date.now() < hydrateDeadline) {
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
 });
-const timeCell = blankRow.querySelector('.Rows_time__t');
-const pinCell = blankRow.querySelector('.Rows_pinIndicator__t');
-const actionCell = blankRow.querySelector('.Rows_rowActions__t');
-assert.ok(timeCell && pinCell && actionCell, 'the first message mounts the trailing cells');
-assert.notEqual(lastChildClass(blankRow), 'dsh-bw-badges',
-  'reproduced: React mounted the trailing cells behind the injected badge row');
-assert.ok((badges.compareDocumentPosition(timeCell) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
-  'reproduced: the time cell follows the badge row in DOM order');
+assert.ok(String(linesOf(workspaceRow)[0].textContent).includes(CACHED_BRANCH),
+  'the badge line paints the cached snapshot before the batch answers');
+assert.ok(String(linesOf(workspaceRow)[0].textContent).includes('+7'),
+  'the cached diff stat is painted too');
 
-/* pass() runs on a 300 ms debounce behind the MutationObserver; poll so the
-   assertion is about the self-heal, not about timing. */
-const healDeadline = Date.now() + 2000;
-while (lastChildClass(blankRow) !== 'dsh-bw-badges' && Date.now() < healDeadline) {
-  await new Promise((resolve) => { setTimeout(resolve, 25); });
+/* The badge content itself comes from the git feed. The scheduler coalesces for
+   250 ms before its first batch, and the mock host adds 1200 ms, so poll
+   instead of assuming timing. */
+await act(async () => {
+  const contentDeadline = Date.now() + 5000;
+  while (!String(linesOf(workspaceRow)[0]?.textContent || '').includes(ROW_BRANCH) && Date.now() < contentDeadline) {
+    await new Promise((resolve) => { setTimeout(resolve, 25); });
+  }
+});
+const line = linesOf(workspaceRow)[0];
+assert.ok(String(line.textContent).includes(ROW_BRANCH), 'the line renders the workspace checkout branch');
+assert.ok(String(line.textContent).includes('+3'), 'the line renders the diff stat');
+assert.ok(String(line.textContent).includes('↑2'), 'the line renders the sync delta');
+assert.ok(!String(line.textContent).includes(CACHED_BRANCH), 'the batch replaced the cached answer');
+/* The debug surface must say where the line landed: "no row matched" and
+   "injected into the wrong node" are otherwise indistinguishable from a blank
+   paint when diagnosing a report. */
+{
+  const badgeProbe = window.__dshBwDebug.badges();
+  const repoProbe = badgeProbe.rows.find((entry) => entry.rowKey === 'workspace:ws-repo');
+  assert.ok(repoProbe, 'the probe reports the rendered Workspace row');
+  assert.equal(repoProbe.hasTitleColumn, true, 'the probe reports the title column anchor');
+  assert.equal(repoProbe.lineInTitleColumn, true, 'the probe reports the line inside the title column');
+  const titlelessProbe = badgeProbe.rows.find((entry) => entry.rowKey === 'workspace:ws-unknown');
+  assert.equal(titlelessProbe.hasTitleColumn, false, 'the probe reports a missing anchor instead of a blank row');
+  assert.equal(titlelessProbe.lineText, null, 'a row without an anchor has no line to report');
+  const ungroupedProbe = badgeProbe.rows.find((entry) => entry.rowKey === 'workspace:');
+  assert.equal(ungroupedProbe.lineText, null, 'the ungrouped bucket is reported as having no line');
 }
-assert.equal(lastChildClass(blankRow), 'dsh-bw-badges',
-  'pass() moved the badge row behind the late-mounted trailing cells');
-for (const cell of [timeCell, pinCell, actionCell]) {
-  assert.ok((cell.compareDocumentPosition(badges) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
-    'every native cell precedes the badge row once healed');
-}
+
+/* ...and the fresh answer is written back for the next visit. */
+await act(async () => {
+  const persistDeadline = Date.now() + 5000;
+  const persisted = () => {
+    try { return window.localStorage.getItem(SNAPSHOT_CACHE_KEY) || ''; } catch { return ''; }
+  };
+  while (!persisted().includes(ROW_BRANCH) && Date.now() < persistDeadline) {
+    await new Promise((resolve) => { setTimeout(resolve, 25); });
+  }
+});
+const persistedPayload = JSON.parse(window.localStorage.getItem(SNAPSHOT_CACHE_KEY));
+assert.equal(persistedPayload.version, 1, 'the persisted payload is versioned');
+assert.equal(persistedPayload.snapshots['/repo'].branch, ROW_BRANCH, 'the fresh branch is persisted for the next visit');
+assert.equal(persistedPayload.snapshots['/plain'].isGit, false, 'non-git answers are persisted too, so they never re-probe');
+
+/* A re-render can replace the title column; pass() must re-home/re-inject the
+   line under the NEW column instead of leaving it behind or duplicating it. */
+rowRound += 1;
+await act(async () => { renderRows(); });
+await act(async () => {
+  const healDeadline = Date.now() + 3000;
+  while (Date.now() < healDeadline) {
+    const current = linesOf(workspaceRow);
+    if (current.length === 1 && current[0].parentElement === columnOf(workspaceRow)) break;
+    await new Promise((resolve) => { setTimeout(resolve, 25); });
+  }
+});
+assert.equal(linesOf(workspaceRow).length, 1, 'a re-created title column still has exactly one line');
+assert.equal(linesOf(workspaceRow)[0].parentElement, columnOf(workspaceRow),
+  'the line followed the re-created title column');
+assert.equal(linesOf(sessionRow).length, 0, 'the Session row still stays untouched after a re-render');
 
 /* ------------------------------------------------------------------ *
  * hero injection anchors (ADR 0001 Amendment 1)
@@ -1012,18 +1162,39 @@ assert.ok(pluginStyle, 'the plugin stylesheet is mounted');
 assert.equal(pluginStyle.dataset.plugin, '@ds-hu/dsh-better-workspaces',
   'the stylesheet carries the scoped module id DSH uses to evict this bundle\'s styles');
 const badgesRule = /\.dsh-bw-badges\s*\{([^{}]*)\}/.exec(pluginStyle.textContent);
-assert.ok(badgesRule, 'the badge row rule is present');
-assert.ok(/(^|[;\s])order:\s*1\b/.test(badgesRule[1]),
-  'the badge row carries order:1 so its line cannot depend on DOM order');
+assert.ok(badgesRule, 'the badge line rule is present');
+assert.ok(!/(^|[;\s])order:/.test(badgesRule[1]),
+  'the badge line sits in flow inside the title column, so it no longer needs an order declaration');
+const projectRowRule = /\[class\*="_projectRow"\]\s*\{([^{}]*)\}/.exec(pluginStyle.textContent);
+assert.ok(projectRowRule, 'the Workspace row rule is present');
+assert.ok(/height:\s*auto/.test(projectRowRule[1]),
+  'the Workspace row stretches to fit the badge line under its title');
+assert.ok(pluginStyle.textContent.indexOf('[class*="_sessionRow"]') === -1,
+  'Session rows are left exactly as the shell renders them');
+const emptyRule = /\.dsh-bw-badges:empty\s*\{([^{}]*)\}/.exec(pluginStyle.textContent);
+assert.ok(emptyRule, 'an empty badge line is hidden');
+assert.ok(/display:\s*none/.test(emptyRule[1]),
+  'the empty line contributes no gap or padding to a non-git Workspace row');
 
 const domEffect = appliedEffects.find((entry) => entry.label === 'better-workspaces: dom injection');
 assert.ok(domEffect, 'the DOM injection effect is registered');
 await act(async () => { domEffect.dispose(); });
 assert.equal(document.querySelectorAll('.dsh-bw-badges').length, 0,
-  'dispose removes every injected badge row (ADR 0001)');
+  'dispose removes every injected badge line (ADR 0001)');
 for (const entry of [...appliedEffects].reverse()) {
   if (entry === domEffect) continue;
   if (entry.dispose) entry.dispose();
+}
+/* Cordis disposes effects LIFO: the injector unmounts every badge root (and
+   calls untrack) before the feed's dispose flushes the cache. A teardown that
+   dropped `byCwd` entries on untrack would store an empty payload here — the
+   exact opposite of what the cache is for. */
+{
+  const survived = JSON.parse(window.localStorage.getItem(SNAPSHOT_CACHE_KEY) || 'null');
+  assert.ok(survived && survived.snapshots && survived.snapshots['/repo'],
+    'plugin teardown keeps the last known answers after every row untracked');
+  assert.equal(survived.snapshots['/repo'].branch, ROW_BRANCH,
+    'the last known branch survives teardown for the next visit');
 }
 assert.equal(window.__dshBwDebug, undefined,
   'disposing every effect removes the diagnostic global (no residue on window)');
@@ -1037,6 +1208,82 @@ globalThis.fetch = window.fetch;
 releaseSecondCss();
 assert.equal(document.querySelectorAll('style[data-plugin-css="dsh-better-workspaces/client.css"]').length, 0,
   'the final package cleanup removes the shared style');
+
+/* ------------------------------------------------------------------ *
+ * persistent snapshot cache, off the live window (ADR 0018 amendment 1)
+ *
+ * The cache is what makes a page load paint immediately; these cases pin the
+ * rules that keep a stale or foreign payload from painting *wrong* data: only
+ * version 1, only shaped snapshots, only within the age window, and bounded on
+ * both count and bytes.
+ * ------------------------------------------------------------------ */
+{
+  const {
+    readSnapshotCache, writeSnapshotCache, snapshotCacheSignature,
+    SNAPSHOT_CACHE_MAX, SNAPSHOT_CACHE_MAX_AGE_MS, SNAPSHOT_CACHE_MAX_BYTES,
+  } = mod.__bwTest;
+  const storage = window.localStorage;
+  storage.removeItem(SNAPSHOT_CACHE_KEY);
+  // cross-realm: the bundle's objects come from the jsdom realm, so compare JSON
+  assert.equal(JSON.stringify(readSnapshotCache()), '{"byCwd":{},"aliases":{}}',
+    'no cache means an empty store, not a throw');
+
+  const now = Date.now();
+  const state = {
+    byCwd: {
+      '/repo': { cwd: '/repo', isGit: true, at: now - 1000, branch: 'main', diffStat: { additions: 1, deletions: 2 } },
+      '/plain': { cwd: '/plain', isGit: false, at: now - 500 },
+      '/ancient': { cwd: '/ancient', isGit: true, at: now - SNAPSHOT_CACHE_MAX_AGE_MS - 1, branch: 'old' },
+      '/future': { cwd: '/future', isGit: true, at: now + 120000, branch: 'future' },
+      '/broken': { cwd: '/broken', at: now },
+    },
+    aliases: {
+      '/sub': { root: '/repo', at: now - 1000 },
+      '/old-sub': { root: '/repo', at: now - SNAPSHOT_CACHE_MAX_AGE_MS - 1 },
+      '/bad': { root: '', at: now },
+    },
+  };
+  assert.equal(writeSnapshotCache(state), true, 'the cache is written');
+  const hydrated = readSnapshotCache();
+  assert.deepEqual(Object.keys(hydrated.byCwd).sort(), ['/plain', '/repo'],
+    'expired, future-dated and unshaped entries are dropped, the rest hydrate');
+  assert.equal(hydrated.byCwd['/repo'].branch, 'main', 'the snapshot is hydrated intact');
+  assert.equal(JSON.stringify(hydrated.aliases), JSON.stringify({ '/sub': { root: '/repo', at: now - 1000 } }),
+    'aliases hydrate within the age window; a self/empty or an expired alias does not');
+
+  storage.setItem(SNAPSHOT_CACHE_KEY, '{not json');
+  assert.equal(JSON.stringify(readSnapshotCache()), '{"byCwd":{},"aliases":{}}', 'a corrupt payload is ignored');
+  storage.setItem(SNAPSHOT_CACHE_KEY, JSON.stringify({ version: 999, snapshots: { '/x': { isGit: true, at: now } } }));
+  assert.equal(JSON.stringify(readSnapshotCache().byCwd), '{}', 'a foreign version is ignored');
+
+  const many = { byCwd: {}, aliases: {} };
+  for (let i = 0; i < SNAPSHOT_CACHE_MAX + 10; i += 1) {
+    many.byCwd['/w' + i] = { cwd: '/w' + i, isGit: true, at: now - i };
+  }
+  writeSnapshotCache(many);
+  const bounded = readSnapshotCache().byCwd;
+  assert.equal(Object.keys(bounded).length, SNAPSHOT_CACHE_MAX,
+    'the cache is bounded by count');
+  assert.ok(Object.hasOwn(bounded, '/w0') && !Object.hasOwn(bounded, '/w' + SNAPSHOT_CACHE_MAX),
+    'the kept set is the newest one, not an arbitrary set of the right size');
+
+  // One oversized entry (a huge PR projection) must be dropped, not force the
+  // whole cache down to nothing or fail the write.
+  const heavy = {
+    byCwd: {
+      '/keep': { cwd: '/keep', isGit: true, at: now, branch: 'keep' },
+      '/huge': { cwd: '/huge', isGit: true, at: now - 1, branch: 'x'.repeat(SNAPSHOT_CACHE_MAX_BYTES) },
+    },
+    aliases: {},
+  };
+  assert.equal(writeSnapshotCache(heavy), true, 'the write still succeeds');
+  const afterHeavy = readSnapshotCache().byCwd;
+  assert.ok(Object.hasOwn(afterHeavy, '/keep') && !Object.hasOwn(afterHeavy, '/huge'),
+    'the byte bound evicts the oversized entry and keeps the small one');
+  assert.equal(snapshotCacheSignature({ byCwd: { a: { at: 1 } }, aliases: {} }), 'a@1#',
+    'the signature changes with the answers, not with unrelated store fields');
+  storage.removeItem(SNAPSHOT_CACHE_KEY);
+}
 
 /* ------------------------------------------------------------------ *
  * hero anchor helpers, off the live window (no app runtime needed —

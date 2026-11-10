@@ -22,11 +22,11 @@ DeepSeek Harness 웹 GUI에서 Git worktree, diff 상세 검토, Pull Request �
 
 ![브랜치 이름, 베이스 선택, Create 버튼이 있는 worktree 폼](docs/screenshots/02-worktree-form.png)
 
-### 3. 세션 목록에서 한눈에 확인하는 Git 상태
+### 3. 워크스페이스 목록에서 한눈에 확인하는 Git 상태
 
-사이드바의 세션 카드 제목 바로 아래에 현재 브랜치와 변경 라인 수(`+11 −3`)가 상시 표시됩니다. 연결된 PR과 CI 검사 상태도 같은 줄에 함께 나타나 터미널에서 `git status`를 반복 입력할 필요가 없습니다.
+사이드바의 워크스페이스 행 제목 바로 아래에 해당 체크아웃의 현재 브랜치와 변경 라인 수(`+11 −3`)가 상시 표시됩니다. 워크스페이스마다 한 줄만 표시되며 세션 행에는 반복되지 않습니다. 연결된 PR과 CI 검사 상태도 같은 줄에 함께 나타나 터미널에서 `git status`를 반복 입력할 필요가 없습니다. 마지막으로 본 상태를 기억해 두므로 화면을 다시 열면 곧바로 표시되고 잠시 뒤 자동으로 갱신됩니다.
 
-![브랜치와 diff 크기를 보여 주는 세션 행](docs/screenshots/03-sidebar-badges.png)
+![브랜치와 diff 크기를 보여 주는 워크스페이스 행](docs/screenshots/03-sidebar-badges.png)
 
 ### 4. 우측 사이드바에서 펼쳐지는 전체 diff 검토
 
