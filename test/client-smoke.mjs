@@ -49,7 +49,7 @@ for (const feature of FEATURES) {
   const mod = entry.factory(factoryRequire);
   assert.equal(typeof mod.apply, 'function', `${feature}: exports.apply`);
   assert.deepEqual(mod.inject, ['slots', 'locale', 'sessions', 'workspaces'], `${feature}: inject list`);
-  assert.equal(typeof T, 'object', `${feature}: __bwTest helpers`);
+  assert.equal(typeof mod.__bwTest, 'object', `${feature}: __bwTest helpers`);
   bundles[feature] = { manifest, source, mod };
 }
 

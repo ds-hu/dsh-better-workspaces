@@ -39,7 +39,7 @@ for (const feature of FEATURES) {
   assert.equal(entry.id, manifest.name, `${feature}: loader id is the package name`);
   bundles[feature] = { source: bundleSource, mod: entry.factory(factory) };
 }
-const T = Object.assign({}, ...FEATURES.map((feature) => bundles[feature].T));
+const T = Object.assign({}, ...FEATURES.map((feature) => bundles[feature].mod.__bwTest));
 const applyAll = (target) => { for (const feature of FEATURES) bundles[feature].mod.apply(target); };
 
 // A second, independently materialized diff package models an HMR overlap. Both
@@ -55,7 +55,7 @@ const legacyStyle = document.createElement('style');
 legacyStyle.dataset.pluginCss = diffCssId;
 legacyStyle.textContent = 'legacy';
 document.head.appendChild(legacyStyle);
-const releaseFirstCss = bundles.diff.T.mountCss();
+const releaseFirstCss = bundles.diff.mod.__bwTest.mountCss();
 const releaseSecondCss = secondDiffMod.__bwTest.mountCss();
 let styles = document.querySelectorAll(`style[data-plugin-css="${diffCssId}"]`);
 assert.equal(styles.length, 1, 'overlapping packages adopt one shared style element');
