@@ -218,7 +218,9 @@ export function probeBadgeDom() {
       hasTitle: Boolean(title),
       hasTitleColumn: Boolean(column),
       lineInTitleColumn: Boolean(line && column && line.parentElement === column),
-      lineText: trim(line),
+      /* null, not '': "this row has no anchor, so it has no line" must stay
+         distinguishable from "this row has an empty line holder" (non-git). */
+      lineText: line ? trim(line) : null,
     };
   });
   const injected = [...document.querySelectorAll('.dsh-bw-badges')].map((el) => ({
