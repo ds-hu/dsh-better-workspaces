@@ -1,7 +1,7 @@
 {
   "name": "@ds-hu/dsh-bw-forge",
   "description": "Forge references: the composer GitHub control with its issue/PR picker, and a right-sidebar Issue 与 PR page beside 代码变更.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -16,7 +16,7 @@
   },
   "icon": "./icon.svg",
   "dependencies": {
-    "@ds-hu/dsh-bw-core": "0.4.0"
+    "@ds-hu/dsh-bw-core": "0.4.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2"

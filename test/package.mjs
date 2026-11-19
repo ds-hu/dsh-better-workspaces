@@ -22,6 +22,11 @@ const repoPath = new URL('.', repo).pathname;
 /** @param {string} path relative to the repository root @returns {Promise<any>} */
 const readJson = async (path) => JSON.parse(await readFile(new URL(path, repo), 'utf8'));
 
+/* Collect every published icon so the suite can prove the artwork is unique
+   per module: four identical copies of the bundle mark is exactly the regression
+   this gate exists for. */
+const ICONS = new Map();
+
 const FEATURES = [
   {
     dir: 'packages/diff',
@@ -77,6 +82,21 @@ for (const feature of FEATURES) {
   );
 }
 assert.equal(root.dependencies?.[CORE.name], root.version, `bundle depends on ${CORE.name}@${root.version}`);
+
+// ---- artwork: the bundle mark plus one distinct icon per module ----
+const bundleIcon = await readFile(new URL('icon.svg', repo));
+assert.ok(bundleIcon.length > 0 && bundleIcon.length <= 256 * 1024, 'bundle icon fits the 256 KiB panel limit');
+assert.match(bundleIcon.toString('utf8'), /<svg[\s>]/, 'bundle icon is SVG');
+assert.doesNotMatch(bundleIcon.toString('utf8'), /<script[\s>]/i, 'bundle icon is self-contained artwork');
+ICONS.set('bundle', { label: 'bundle', bytes: bundleIcon });
+const artwork = [...ICONS.entries()];
+for (let i = 0; i < artwork.length; i += 1) {
+  for (let j = i + 1; j < artwork.length; j += 1) {
+    const [leftId, left] = artwork[i];
+    const [rightId, right] = artwork[j];
+    assert.ok(!left.bytes.equals(right.bytes), `${leftId} and ${rightId} ship distinct icon artwork`);
+  }
+}
 
 // ---- the patch: exactly one row per feature, bare package names, stable ids ----
 const patch = await readFile(new URL('cordis.patch.yml', repo), 'utf8');
@@ -195,6 +215,7 @@ const forFeature = async (feature) => {
   assert.ok(icon.length > 0 && icon.length <= 256 * 1024, `${label}: icon fits the 256 KiB panel limit`);
   assert.match(icon.toString('utf8'), /<svg[\s>]/, `${label}: icon is SVG`);
   assert.doesNotMatch(icon.toString('utf8'), /<script[\s>]/i, `${label}: icon is self-contained artwork`);
+  ICONS.set(feature.row, { label, bytes: icon });
 
   // Published file set: real code + metadata, never tests, CI config or
   // dependencies.

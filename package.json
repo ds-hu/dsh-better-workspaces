@@ -1,7 +1,7 @@
 {
   "name": "@ds-hu/dsh-better-workspaces",
   "description": "Worktrees, diffs, pull requests, and issue references inside the DeepSeek Harness Web GUI — now delivered as four independently switchable feature plugins.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -31,11 +31,11 @@
     "dsh": ">=0.2.0 <0.3.0"
   },
   "dependencies": {
-    "@ds-hu/dsh-bw-core": "0.4.0",
-    "@ds-hu/dsh-bw-diff": "0.4.0",
-    "@ds-hu/dsh-bw-forge": "0.4.0",
-    "@ds-hu/dsh-bw-status": "0.4.0",
-    "@ds-hu/dsh-bw-worktree": "0.4.0"
+    "@ds-hu/dsh-bw-core": "0.4.1",
+    "@ds-hu/dsh-bw-diff": "0.4.1",
+    "@ds-hu/dsh-bw-forge": "0.4.1",
+    "@ds-hu/dsh-bw-status": "0.4.1",
+    "@ds-hu/dsh-bw-worktree": "0.4.1"
   },
   "dsh": {
     "bundle": {
