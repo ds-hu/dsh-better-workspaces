@@ -833,7 +833,9 @@ async function renderComponent(component, props) {
 // share one jsdom localStorage) and assert the defaults are back.
 worktreeModule.__bwTest.surfacePrefs.reset();
 forgeModule.__bwTest.surfacePrefs.reset();
-assert.deepEqual(worktreeModule.__bwTest.surfacePrefs.get(), { hero: true, sidebar: true }, 'worktree prefs end at their defaults');
-assert.deepEqual(forgeModule.__bwTest.surfacePrefs.get(), { composer: true, sidebar: true }, 'forge prefs end at their defaults');
+/* The bundles run inside the jsdom realm, so their plain objects carry that
+   realm's prototypes; re-create them here before deepStrictEqual. */
+assert.deepEqual({ ...worktreeModule.__bwTest.surfacePrefs.get() }, { hero: true, sidebar: true }, 'worktree prefs end at their defaults');
+assert.deepEqual({ ...forgeModule.__bwTest.surfacePrefs.get() }, { composer: true, sidebar: true }, 'forge prefs end at their defaults');
 
 process.stdout.write('surfaces: 2 new pages and 2 row config pages pass\n');
