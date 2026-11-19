@@ -86,7 +86,9 @@ assert.deepEqual(rows, FEATURES.map((feature) => feature.row), 'patch rows are e
 assert.deepEqual(names, FEATURES.map((feature) => feature.name), 'patch row names are the four package names, in order');
 assert.equal(new Set(rows).size, rows.length, 'patch row ids are unique');
 assert.equal(new Set(names).size, names.length, 'patch row names are unique');
-assert.ok(!patch.includes('dsh-bw-core'), 'core is never a Loader row');
+// Comments are allowed to name the library; only a row may not.
+assert.ok(!names.includes('@ds-hu/dsh-bw-core'), 'core is never a Loader row');
+assert.ok(!rows.includes('bw-core'), 'core has no row id');
 
 // ---- core: a library that the panel cannot switch ----
 const core = await readJson(`${CORE.dir}/package.json`);
