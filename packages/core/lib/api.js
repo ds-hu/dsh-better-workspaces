@@ -65,6 +65,51 @@ import { hostMutationCoordinator } from './mutation.js';
 
 export const API_PREFIX = '/better-workspaces/api';
 
+/**
+ * Every route the prefix router answers, tagged with the feature row that owns
+ * it (docs/ARCHITECTURE-modules.md §5). 0.4.0 mounts four independent Loader
+ * rows; each row claims the groups its browser surface calls, and the runtime
+ * (engine.js) always owns `data` so a read-only row such as bw-forge still has
+ * its data plane. A route whose group nobody claimed is a *disabled feature*,
+ * not an unknown route: it answers 404 before authorization, so a switched-off
+ * row cannot leak even an authorization answer.
+ */
+export const API_GROUPS = Object.freeze({
+  data: Object.freeze(['GET /detect', 'POST /snapshots', 'GET /snapshot', 'GET /events', 'GET /pulls', 'GET /pull']),
+  diff: Object.freeze(['GET /diff', 'GET /commits', 'GET /raw']),
+  file: Object.freeze(['GET /file', 'POST /file']),
+  actions: Object.freeze(['GET /actions', 'POST /action']),
+  archive: Object.freeze(['GET /worktrees/deferred', 'POST /worktrees/finalize-delete']),
+  worktree: Object.freeze([
+    'GET /branches',
+    'GET /worktrees',
+    'POST /worktrees',
+    'POST /worktrees/archive',
+    'POST /worktrees/cleanup',
+  ]),
+  status: Object.freeze(['GET /worktree-workspaces']),
+});
+
+const ROUTE_GROUPS = new Map();
+for (const [group, routes] of Object.entries(API_GROUPS)) {
+  for (const route of routes) ROUTE_GROUPS.set(route, group);
+}
+
+/**
+ * The feature group owning `METHOD /sub`, or `null` for a path this router does
+ * not serve at all. The `null` distinction matters: an unknown path must keep
+ * its 0.3.x `unknown route` 404, while a known path of a disabled row answers
+ * the feature-disabled 404.
+ *
+ * @param method - request method (`GET`, `POST`, …).
+ * @param sub - pathname below {@link API_PREFIX}, including the leading slash.
+ * @returns {string|null}
+ */
+export function groupForPath(method, sub) {
+  if (typeof method !== 'string' || typeof sub !== 'string') return null;
+  return ROUTE_GROUPS.get(`${method.toUpperCase()} ${sub}`) ?? null;
+}
+
 const TEXT_MAX_BYTES = 1024 * 1024;
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif']);
 const CONTENT_TYPE = {
@@ -435,9 +480,27 @@ function exchangeAnchored(parentHandle, sourceName, targetName) {
 
 /**
  * Build the webServer route + SSE broadcaster bound to one hub.
+ *
+ * `options.groups` is the 0.4.0 feature switch: a `Set<string>` of enabled
+ * route groups (or a function returning the live set). Omitted/`null` means
+ * every group is enabled — the 0.3.x behaviour the host suites depend on.
+ * The runtime in `engine.js` passes a function, because its rows claim and
+ * release groups while they mount and dispose.
+ *
  * @returns {{route:object, broadcast:(snapshot:object)=>void, dispose:()=>void}}
  */
 export function createApi(hub, options = {}) {
+  const groups = options.groups;
+  const enabledGroups = () => {
+    const current = typeof groups === 'function' ? groups() : groups;
+    if (current === undefined || current === null) return null;
+    return current;
+  };
+  const groupEnabled = (group) => {
+    const current = enabledGroups();
+    if (current === null) return true;
+    return typeof current.has === 'function' ? current.has(group) : Array.from(current).includes(group);
+  };
   const cleanup = typeof options.cleanup === 'function' ? options.cleanup : null;
   const resolvePull = typeof options.resolvePull === 'function' ? options.resolvePull : pullRequestDetail;
   const resolveForgeIdentity = typeof options.resolveForgeIdentity === 'function' ? options.resolveForgeIdentity : forgeIdentityForCwd;
@@ -732,6 +795,14 @@ export function createApi(hub, options = {}) {
     if (disposed) return sendJson(res, 503, { ok: false, error: 'API is stopping' });
     const sub = url.pathname.slice(API_PREFIX.length) || '/';
     const query = url.searchParams;
+    // Feature switch before anything else: a route of a row that is not
+    // mounted answers the documented disabled-feature shape, never an
+    // authorization or filesystem answer computed on its behalf. Unknown paths
+    // (groupForPath → null) keep the 0.3.x `unknown route` 404 below.
+    const routeGroup = groupForPath(req.method, sub);
+    if (routeGroup !== null && !groupEnabled(routeGroup)) {
+      return sendJson(res, 404, { ok: false, error: 'feature module disabled' });
+    }
     if (req.method === 'POST') {
       const contentType = String(req.headers['content-type'] || '').toLowerCase();
       if (contentType.split(';', 1)[0].trim() !== 'application/json') {

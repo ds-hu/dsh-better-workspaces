@@ -1,30 +1,25 @@
 /**
- * dsh-better-workspaces — host half.
+ * dsh-better-workspaces core — the shared library surface.
  *
- * Wires the git-state hub to the harness webServer (HTTP + SSE under
- * /better-workspaces/api) and to host activity events so snapshots stay
- * fresh while agents run. `webServer` and the Workspace registry are hard
- * dependencies, so routes cannot race cold boot or mount without their
- * authorization source (ADR 0005, ADR 0010). Optional integrations still
- * degrade gracefully: non-git Workspace → {isGit:false}; no gh CLI → flags.
+ * `@ds-hu/dsh-bw-core` is not a Loader row: it declares neither `dsh.bundle`
+ * nor `dsh.client`, so the plugin panel can never switch it and no feature row
+ * can accidentally unmount it (docs/ARCHITECTURE-modules.md §2). The four
+ * feature rows (`bw-diff`, `bw-worktree`, `bw-status`, `bw-forge`) import this
+ * package, and the host suites import the same entry points directly.
+ *
+ * What lives here:
+ *   - the scheduler/authorizer/deletion helpers that are pure host policy;
+ *   - the config reader every row validates its `worktreesDir` with;
+ *   - re-exports of the one router (`api.js`) and the per-root runtime
+ *     (`engine.js`) those rows lease.
+ *
+ * 0.3.x kept `apply`, `name` and `inject` here; they moved to the four feature
+ * entries, and the process-wide wiring they created moved to `engine.js`.
  */
-import { join } from 'node:path';
-import { createApi } from './api.js';
-import { createCleanup } from './cleanup.js';
-import {
-  configureWorktreesBaseDir,
-  defaultWorktreesRoot,
-  managedWorktreesUnder,
-  normalizeWorktreesDir,
-  validateManagedCheckout,
-} from './worktree.js';
-import { createGitStateHub } from './state.js';
-import { detectRepoCached } from './discovery.js';
-import { createWorkspaceAuthorizer } from './authorize.js';
-import { hostMutationCoordinator } from './mutation.js';
-import { samePath } from './stable.js';
+import { normalizeWorktreesDir } from './worktree.js';
 
-export const name = 'better-workspaces';
+export { API_GROUPS, API_PREFIX, createApi, groupForPath } from './api.js';
+export { acquireRuntime } from './engine.js';
 
 // The only options any caller passes are `start`, `signal` and `onStop`; the
 // boot/hourly cadence itself is fixed (5 s settle, then hourly replay).
@@ -53,11 +48,6 @@ export function createCleanupScheduler(cleanupFn, options = {}) {
     },
   };
 }
-
-// `webServer` and `workspaceRegistry` are hard dependencies: without the
-// first there is no surface; without the second cwd would have no authority
-// source. Cordis waits and re-activates after both appear (ADR 0005/0010).
-export const inject = ['webServer', 'workspaceRegistry'];
 
 export function createCreationSourceGuard(ctx) {
   return async (sourceSessionId, expectedCwd) => {
@@ -108,11 +98,15 @@ export async function deleteWorkspace(registry, workspaceId, expectedPath, captu
   throw new Error('workspace deletion is disabled until raw durable membership can be proven');
 }
 
-/** Config keys the plugin row accepts today. */
+/** Config keys the feature rows accept today. */
 const CONFIG_KEYS = ['worktreesDir'];
 
 /**
- * Read the plugin row's `config` (ADR 0017).
+ * Read one feature row's `config` (ADR 0017).
+ *
+ * All four rows accept the same optional object, so the key may be written on
+ * any single row (recommended: `bw-worktree`); `engine.js` fixes the first
+ * non-null value for the whole root and refuses disagreement.
  *
  * Unknown keys are refused rather than ignored: `worktreeDir` / `baseDir` are
  * exactly the spellings a user is likely to guess, and silently ignoring one
@@ -134,173 +128,4 @@ export function readWorktreesDirConfig(config) {
     );
   }
   return normalizeWorktreesDir(config.worktreesDir);
-}
-
-/**
- * Boot-time warning, never a blocker: after `worktreesDir` changes, the
- * checkouts under the built-in base keep working for diffs, commits and pushes,
- * but they are no longer a managed namespace (no archive, no abandoned sweep)
- * and nothing else would ever say so (ADR 0017).
- */
-async function warnStrandedManagedWorktrees(ctx, configured) {
-  const previous = defaultWorktreesRoot();
-  const stranded = await managedWorktreesUnder(previous);
-  if (stranded.length === 0) return;
-  ctx.logger?.warn?.(
-    `better-workspaces: ${stranded.length} managed worktree(s) are still under ${previous}, `
-    + `but worktreesDir is ${configured}; those checkouts keep diffs, commits and pushes, but they `
-    + 'are no longer managed (no archive, no abandoned cleanup). Move them under '
-    + `${join(configured, '<repoHash>')}/ or point worktreesDir back.`,
-  );
-}
-
-export function apply(ctx, config = {}) {
-  // The base directory must be settled before the hub, cleanup and API capture
-  // anything derived from it (ADR 0017).
-  const worktreesDir = readWorktreesDirConfig(config);
-  configureWorktreesBaseDir(worktreesDir);
-  if (worktreesDir && !samePath(worktreesDir, defaultWorktreesRoot())) {
-    // Fire-and-forget on purpose: a diagnostic must never delay or fail the
-    // mount, and a large previous base should not block boot.
-    void warnStrandedManagedWorktrees(ctx, worktreesDir).catch(() => {});
-  }
-  let broadcast = null;
-  const lifecycle = new AbortController();
-  const mutations = hostMutationCoordinator;
-  const registry = ctx.get('workspaceRegistry');
-  const workspaceRows = () => registry.list();
-  const deleteWorkspaceFromRegistry = deleteWorkspace.bind(null, registry);
-  const workspaceRoots = () => workspaceRows().map((workspace) => workspace.path);
-  const authorizer = createWorkspaceAuthorizer({ workspaceRoots });
-  const hub = createGitStateHub({
-    mutations,
-    authorizeTarget: (cwd) => authorizer.authorize(cwd),
-    onChange: (snapshot) => {
-      if (broadcast) broadcast(snapshot);
-    },
-  });
-  // Register ownership immediately so any later apply failure rolls timers and
-  // watchers back with the Cordis fiber.
-  ctx.effect(
-    () => () => hub.dispose(),
-    'better-workspaces: hub',
-  );
-  ctx.effect(
-    () => () => lifecycle.abort(),
-    'better-workspaces: lifecycle abort',
-  );
-
-  // Boot/hourly jobs replay durable recovery records only. Destructive
-  // abandoned cleanup stays explicit until Session exposes an atomic lease.
-  const cleanupFn = createCleanup(ctx, {
-    mutations,
-    signal: lifecycle.signal,
-    recoveryOnly: true,
-    deleteWorkspace: deleteWorkspaceFromRegistry,
-  });
-  ctx.effect(
-    () => {
-      const scheduler = createCleanupScheduler(cleanupFn, {
-        signal: lifecycle.signal,
-        onStop: () => lifecycle.abort(),
-      });
-      return () => scheduler.dispose();
-    },
-    'better-workspaces: abandoned sweep',
-  );
-
-  const webServer = ctx.get('webServer');
-  if (webServer) {
-    // workspace rows whose path is a managed worktree (sidebar icon injector)
-    const worktreeWorkspaces = async () => {
-      if (!registry || typeof registry.list !== 'function') return [];
-      const items = [];
-      for (const ws of registry.list()) {
-        const path = ws && ws.path;
-        if (typeof path !== 'string' || path === '') continue;
-        // Read route: the cached discovery saves three spawns per row, and the
-        // ownership proof inside `validateManagedCheckout` stays live. A drifted
-        // checkout keeps its sidebar identity: the branch it is on now is not
-        // part of what makes it ours.
-        const detected = await detectRepoCached(path).catch(() => null);
-        const managed = await validateManagedCheckout(path, detected ? { detected } : {});
-        if (managed.ok) items.push({ workspaceId: ws.workspaceId ?? ws.id, path: managed.cwd });
-      }
-      return items;
-    };
-    const api = createApi(hub, {
-      cleanup: cleanupFn,
-      workspaceRoots,
-      worktreeWorkspaces,
-      workspaceRows,
-      createWorkspace: (path, title) => registry.create(path, title),
-      assertCreationSource: createCreationSourceGuard(ctx),
-      assertWorkspaceArchivable,
-      deleteWorkspace: deleteWorkspaceFromRegistry,
-      mutations,
-    });
-    broadcast = api.broadcast;
-    ctx.effect(
-      () => {
-        let unregister;
-        try {
-          unregister = webServer.register(api.route);
-        } catch (error) {
-          api.dispose();
-          throw error;
-        }
-        return async () => {
-          unregister();
-          await api.dispose();
-        };
-      },
-      'better-workspaces: api routes',
-    );
-  }
-
-  // Agent activity → the one repository family that activity belongs to.
-  //
-  // This used to call `hub.refreshActive()`, which recomputes every tracked
-  // target: twenty workspaces × ~45 spawns is a ~25 s lane load, longer than the
-  // 5 s throttle, so while an agent worked the lane never drained and every
-  // interactive route queued behind it (ADR 0018). A tool result names one
-  // Session; the Session names one cwd; the cwd names one repository family.
-  // When any link is missing the throttled full refresh stays as the fallback.
-  const sessionsOf = () => {
-    const sessions = ctx.get('sessions');
-    return sessions && typeof sessions.list === 'function' ? sessions : null;
-  };
-  const sessionCwdOf = async (sessionId) => {
-    if (typeof sessionId !== 'string' || sessionId === '') return null;
-    const sessions = sessionsOf();
-    if (!sessions) return null;
-    try {
-      const snapshot = await sessions.list();
-      const summaries = Array.isArray(snapshot)
-        ? snapshot
-        : Array.isArray(snapshot?.items) ? snapshot.items
-          : Array.isArray(snapshot?.ids) && snapshot?.byId ? snapshot.ids.map((id) => snapshot.byId[id]) : [];
-      const summary = summaries.find((item) => String(item?.id ?? item?.sessionId ?? '') === sessionId);
-      // The header cwd is the original project; a Session that moved into a
-      // worktree still resolves to the same repository *family*, which is what
-      // `invalidateFamily` needs.
-      return summary?.header?.cwd ?? summary?.cwd ?? null;
-    } catch {
-      return null;
-    }
-  };
-  const refreshSession = (sessionId) => {
-    sessionCwdOf(sessionId)
-      .then(async (cwd) => {
-        if (!cwd) return false;
-        return (await hub.invalidateFamily(cwd)) > 0;
-      })
-      .then((narrowed) => {
-        if (!narrowed) hub.refreshActive();
-      })
-      .catch(() => {});
-  };
-  ctx.on('tools/result', (exec) => refreshSession(exec?.agent?.session?.id));
-  ctx.on('api-session/status', (sessionId) => refreshSession(sessionId));
-
 }

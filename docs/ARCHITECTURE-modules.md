@@ -96,8 +96,12 @@ export function acquireRuntime(ctx, config) // -> runtime handle, ref-counted
 * The runtime owns: the git state hub, the workspace authorizer, the mutation
   coordinator, the single `webServer` prefix route, SSE fan-out and the
   snapshot/forge read paths.
-* `handle.claim(group)` / `handle.releaseGroup(group)` add and remove route
-  groups. The data plane group (`data`) is always on while any row is alive.
+* `handle.claim(groups)` adds route groups and returns an **idempotent
+  disposer** that removes exactly those claims (`claim` is ref-counted per
+  group, so two rows may share one). The data plane group (`data`) is always on
+  while any row is alive and cannot be claimed away. (`groupsOwner` is an alias
+  kept for the naming in §4.1 of the original design note; there is no separate
+  `releaseGroup` — disposing the claim is the release.)
 * `config`: feature rows accept the same optional core config
   (`worktreesDir`). The runtime accepts the first non-null value and throws on
   disagreement, so the key may be written on any one row (recommended:
@@ -105,8 +109,10 @@ export function acquireRuntime(ctx, config) // -> runtime handle, ref-counted
 * The runtime exposes the helpers a feature row's route group needs
   (`hub`, `authorizer`, `workspaceRows`, `createWorkspace`,
   `assertCreationSource`, `assertWorkspaceArchivable`, `deleteWorkspace`,
-  `cleanup`, `mutations`, `withStableRoot`), so a group factory receives one
-  object instead of eight closures.
+  `cleanup`, `mutations`), so a group factory receives one object instead of
+  eight closures. Helpers that only the engine's own API construction needs
+  (for example the stable-root guard) stay internal and are not part of the
+  handle.
 
 ### 4.2 Feature row (`packages/<feature>/lib/index.js`)
 
@@ -122,7 +128,10 @@ export function apply(ctx, config = {}) {
 ```
 
 `bw-worktree` additionally starts the cleanup scheduler inside its own
-`ctx.effect`; nothing else differs.
+`ctx.effect`, with its own `AbortController` (not the shared runtime lifecycle):
+turning this one row off must abort only its in-flight sweep, never the hub or
+another row's work, and remounting starts from a fresh signal. Nothing else
+differs.
 
 ## 5. HTTP contract
 
