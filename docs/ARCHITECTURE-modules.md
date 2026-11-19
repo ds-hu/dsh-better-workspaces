@@ -197,6 +197,11 @@ packages/<feature>/lib/client.js built artifact, git-ignored, produced by CI
 * Each bundle registers its own locale namespace
   (`bw-diff`, `bw-worktree`, `bw-status`, `bw-forge`) and its own CSS tag
   (`data-plugin-css="<package name>/client.css"`).
+* Each row package ships its own `icon.svg` through both the manifest `icon`
+  field and the `./icon` export; the four glyphs share one tile family but are
+  distinct (split diff, branch fork, status line, conversation). The bundle
+  icon draws the four module panes it mounts. `test/package.mjs` fails when two
+  published icons are byte-identical.
 * The new right-sidebar pages use the same `registerSidebarPage` helper as the
   diff page: page type + `sidebar.right.pane.tab` body + `.title` + a `guide`
   entry, so they appear beside 代码变更 on the sidebar's start page and as

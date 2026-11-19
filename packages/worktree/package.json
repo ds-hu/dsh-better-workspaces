@@ -1,7 +1,7 @@
 {
   "name": "@ds-hu/dsh-bw-worktree",
   "description": "New-worktree creation: the composer staging strip and a matching right-sidebar 新建 worktree page, plus managed-worktree maintenance.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -16,7 +16,7 @@
   },
   "icon": "./icon.svg",
   "dependencies": {
-    "@ds-hu/dsh-bw-core": "0.4.0"
+    "@ds-hu/dsh-bw-core": "0.4.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2"

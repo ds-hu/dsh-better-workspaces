@@ -1,7 +1,7 @@
 {
   "name": "@ds-hu/dsh-bw-status",
   "description": "Git status where the work happens: the branch/PR/diff badge line under each Workspace title and the composer diff pill.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -16,7 +16,7 @@
   },
   "icon": "./icon.svg",
   "dependencies": {
-    "@ds-hu/dsh-bw-core": "0.4.0"
+    "@ds-hu/dsh-bw-core": "0.4.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2"
