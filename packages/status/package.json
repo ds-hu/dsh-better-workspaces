@@ -1,0 +1,53 @@
+{
+  "name": "@ds-hu/dsh-bw-status",
+  "description": "Git status where the work happens: the branch/PR/diff badge line under each Workspace title and the composer diff pill.",
+  "version": "0.4.0",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "icon": "./icon.svg",
+  "dependencies": {
+    "@ds-hu/dsh-bw-core": "0.4.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "engines": {
+    "node": ">=20.19.0",
+    "dsh": ">=0.2.0 <0.3.0"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ],
+      "platform": "web"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ds-hu/dsh-better-workspaces.git",
+    "directory": "packages/status"
+  },
+  "license": "MIT",
+  "files": [
+    "lib",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "LICENSES"
+  ]
+}

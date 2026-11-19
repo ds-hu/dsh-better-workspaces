@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Code Changes",
+    "description": "The right-sidebar diff review page: uncommitted/committed/task diffs, the commit-to-PR action ladder, pull request creation and merge, and the CAS-protected file editor."
+  }
+}
