@@ -18,7 +18,6 @@ export default defineConfig([
       'packages/*/LICENSES/**',
       'packages/*/lib/client.js',
       'packages/*/lib/client.js.map',
-      'packages/core/client/legacy-bundle.js',
       '*.tgz',
     ],
   },

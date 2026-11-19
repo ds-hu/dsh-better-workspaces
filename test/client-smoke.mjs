@@ -31,24 +31,33 @@ const factoryRequire = (specifier) => {
 };
 
 globalThis.window = globalThis;
-let loadedEntry = null;
-globalThis.__ModuleLoader__ = {
-  load(entry) {
-    loadedEntry = entry;
-  },
-};
 
-const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
-(0, eval)(source);
+/* Four self-contained bundles, one per feature row (ADR "modular 0.4.0"):
+   every bundle bundles its own copy of the core modules, so each one is loaded,
+   materialized and applied independently, in the documented merge order. */
+const FEATURES = ['diff', 'worktree', 'status', 'forge'];
+const bundles = {};
+for (const feature of FEATURES) {
+  const manifest = JSON.parse(readFileSync(new URL(`../packages/${feature}/package.json`, import.meta.url), 'utf8'));
+  const source = readFileSync(new URL(`../packages/${feature}/lib/client.js`, import.meta.url), 'utf8');
+  let entry = null;
+  globalThis.__ModuleLoader__ = { load(value) { entry = value; } };
+  (0, eval)(source);
+  assert.ok(entry, `${feature}: bundle called __ModuleLoader__.load`);
+  assert.equal(entry.id, manifest.name, `${feature}: bundle id is the package name`);
+  assert.equal(typeof entry.factory, 'function');
+  const mod = entry.factory(factoryRequire);
+  assert.equal(typeof mod.apply, 'function', `${feature}: exports.apply`);
+  assert.deepEqual(mod.inject, ['slots', 'locale', 'sessions', 'workspaces'], `${feature}: inject list`);
+  assert.equal(typeof T, 'object', `${feature}: __bwTest helpers`);
+  bundles[feature] = { manifest, source, mod };
+}
 
-assert.ok(loadedEntry, 'bundle called __ModuleLoader__.load');
-assert.equal(loadedEntry.id, manifest.name);
-assert.equal(typeof loadedEntry.factory, 'function');
-
-const mod = loadedEntry.factory(factoryRequire);
-assert.equal(typeof mod.apply, 'function', 'exports.apply');
-assert.deepEqual(mod.inject, ['slots', 'locale', 'sessions', 'workspaces']);
+/** All bundle sources, for source-shape guards. */
+const source = FEATURES.map((feature) => bundles[feature].source).join('\n');
+/** The merged test surface: the browser suite's `T`. */
+const T = Object.assign({}, ...FEATURES.map((feature) => bundles[feature].mod.__bwTest));
+const applyAll = (target) => { for (const feature of FEATURES) bundles[feature].mod.apply(target); };
 
 /* ---------------- dictionary parity + interpolation ---------------- */
 let dictionaries = null;
@@ -85,6 +94,8 @@ const inputTriggers = {
 const SESSION_SCOPE = Symbol('session-scope');
 let sessionSnapshot = { byId: {}, ids: [], current: undefined, phase: 'ready' };
 
+const localeRegistrations = new Map();
+let currentSlot = null;
 const ctx = {
   // a hard inject would make `sidebarRightTabs` a ctx property inside the fiber
   sidebarRightTabs,
@@ -117,12 +128,13 @@ const ctx = {
   },
   locale: {
     register(ns, dicts) {
-      dictionaries = { ns, dicts };
+      localeRegistrations.set(ns, dicts);
       return () => {};
     },
-    bind(_ns) {
+    bind(ns) {
       return (key, params) => {
-        let template = dictionaries.dicts.zh[key] ?? key;
+        const dicts = localeRegistrations.get(ns) || { zh: {}, en: {} };
+        let template = dicts.zh[key] ?? key;
         if (params) {
           template = template.replace(/\{(\w+)\}/g, (match, name) =>
             name in params ? String(params[name]) : match,
@@ -134,11 +146,13 @@ const ctx = {
   },
   slots: {
     inject(slotName, registerFn) {
+      currentSlot = slotName;
       const dispose = registerFn();
+      currentSlot = null;
       registrations.push({ slotName, dispose });
     },
     register(descriptor, component) {
-      registrations.push({ descriptor, component });
+      registrations.push({ slotName: currentSlot, descriptor, component });
       return () => {};
     },
   },
@@ -163,13 +177,21 @@ const ctx = {
   workspaces: { items: [], create: async () => ({ ok: false }) },
 };
 
-mod.apply(ctx);
+applyAll(ctx);
 
-assert.ok(dictionaries, 'locale dictionaries registered');
-assert.equal(dictionaries.ns, 'better-workspaces');
-const zhKeys = Object.keys(dictionaries.dicts.zh).sort();
-const enKeys = Object.keys(dictionaries.dicts.en).sort();
-assert.deepEqual(enKeys, zhKeys, 'zh/en key parity');
+/* One namespace per bundle, each registered with its own dictionaries. */
+assert.deepEqual([...localeRegistrations.keys()].sort(), ['bw-diff', 'bw-forge', 'bw-status', 'bw-worktree'],
+  'each bundle registers exactly one locale namespace');
+for (const [ns, dicts] of localeRegistrations) {
+  const zhKeys = Object.keys(dicts.zh).sort();
+  const enKeys = Object.keys(dicts.en).sort();
+  assert.deepEqual(enKeys, zhKeys, `${ns}: zh/en key parity`);
+}
+/* `dictionaries` is the merged view the older assertions read. */
+dictionaries = { ns: [...localeRegistrations.keys()].join(','), dicts: {
+  zh: Object.assign({}, ...[...localeRegistrations.values()].map((dicts) => dicts.zh)),
+  en: Object.assign({}, ...[...localeRegistrations.values()].map((dicts) => dicts.en)),
+} };
 assert.equal(dictionaries.dicts.zh['view.diff'], 'diff');
 assert.equal(dictionaries.dicts.zh['view.files'], undefined, 'the 文件 conversation view is gone');
 
@@ -184,10 +206,14 @@ for (const r of registrations.filter((x) => x.component)) {
   assert.equal(typeof r.component, 'function', 'component is a function');
 }
 // every remaining descriptor carries an inject(sessionId) that yields {sessionId}
+const SLOT_LOCALE = new Map([
+  ['git-diff-pill', 'bw-status'],
+  ['forge-issue-pr', 'bw-forge'],
+]);
 for (const d of [...docks, ...descriptors.filter((x) => x.name === 'conversation.input.left')]) {
   assert.equal(typeof d.inject, 'function');
   assert.deepEqual(d.inject('s-1'), { sessionId: 's-1' });
-  assert.equal(d.locale, 'better-workspaces');
+  assert.equal(d.locale, SLOT_LOCALE.get(d.id), `${d.name}/${d.id}: owns its feature namespace`);
 }
 
 /* ---------------- the composer's forge (issue / PR) control ---------------- */
@@ -211,17 +237,17 @@ assert.equal(typeof forgeSource.codec.serialize, 'function');
    official TriggerChar union is '/' | '@', and `trigger` is the lexicon's key
    domain). Keeping them different is the fix: an "@N" chip woke the official
    attachment/reference menu on the same keystroke. */
-const forgeRef = mod.__bwTest.encodeForgeRef({ host: 'github.com', owner: 'acme', repo: 'widget', kind: 'change_request', number: 7 });
+const forgeRef = T.encodeForgeRef({ host: 'github.com', owner: 'acme', repo: 'widget', kind: 'change_request', number: 7 });
 assert.ok(forgeRef.startsWith('bw1'));
-assert.deepEqual(mod.__bwTest.decodeForgeRef(forgeRef), {
+assert.deepEqual(T.decodeForgeRef(forgeRef), {
   version: 1, host: 'github.com', owner: 'acme', repo: 'widget', kind: 'change_request', number: 7,
 });
 assert.equal(forgeSource.codec.clipboardText(forgeRef), '[[dsh-bw1:https://github.com/acme/widget/pull/7]]');
-const issueRef = mod.__bwTest.encodeForgeRef({ host: 'github.com', owner: 'acme', repo: 'widget', kind: 'issue', number: 7 });
-const enterpriseRef = mod.__bwTest.encodeForgeRef({ host: 'ghe.example.test', owner: 'acme', repo: 'widget', kind: 'change_request', number: 7 });
+const issueRef = T.encodeForgeRef({ host: 'github.com', owner: 'acme', repo: 'widget', kind: 'issue', number: 7 });
+const enterpriseRef = T.encodeForgeRef({ host: 'ghe.example.test', owner: 'acme', repo: 'widget', kind: 'change_request', number: 7 });
 assert.notEqual(issueRef, forgeRef, 'issue and PR #7 do not collide');
 assert.notEqual(enterpriseRef, forgeRef, 'enterprise and public repositories do not collide');
-assert.equal(mod.__bwTest.decodeForgeRef('bw1not-hex'), null, 'malformed versioned refs fail closed');
+assert.equal(T.decodeForgeRef('bw1not-hex'), null, 'malformed versioned refs fail closed');
 assert.equal(forgeSource.codec.clipboardText('7'), '#7', 'legacy numeric refs retain their projection');
 await assert.rejects(forgeSource.codec.serialize('7'), /Forge|无法读取|Could not read/i,
   'legacy number-only refs fail closed because they carry no repository provenance');
@@ -248,7 +274,7 @@ assert.equal(await forgeSource.codec.serialize('7', { aborted: false }).then(() 
 const originalFetch = globalThis.fetch;
 let detailUrl = null;
 sessionSnapshot = { byId: { 's-1': { cwd: '/repo-a' } }, ids: ['s-1'], current: 's-1', phase: 'ready' };
-mod.__bwTest.forgeItems.set(forgeRef, { title: 'stale list row' });
+T.forgeItems.set(forgeRef, { title: 'stale list row' });
 globalThis.fetch = async (url) => {
   detailUrl = String(url);
   return { json: async () => ({ ok: true, item: {
@@ -307,7 +333,7 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
 {
   // Keep this white-box contract walker independent of React's opaque element
   // internals. Real reconciliation/effects are mandatory in client-react.mjs.
-  const { ForgeAttachControl } = mod.__bwTest;
+  const { ForgeAttachControl } = T;
   assert.equal(typeof ForgeAttachControl, 'function', 'the control is exported for this suite');
   // the control asks the session list for its cwd and renders nothing without
   // one (that guard is deliberate), so give the mock a session that has one
@@ -411,7 +437,7 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
   ctx.get = (name) => (name === 'conversation' ? conversation : originalGet ? originalGet(name) : undefined);
 
   const item = { host: 'github.com', owner: 'acme', repo: 'widget', number: 7, kind: 'change_request', title: 'wire up the picker', state: 'OPEN' };
-  const detectEnd = mod.__bwTest.referenceDetectEnd;
+  const detectEnd = T.referenceDetectEnd;
 
   // (a) the projection contract: occurrence ranges are CLIPBOARD coordinates,
   // while every real chip contributes exactly one U+FFFC to detect text.
@@ -440,12 +466,12 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
 
   // (b) a binding is NOT a session scope: it must resolve to null, not throw.
   assert.equal(
-    mod.__bwTest.resolveForgeSessionInput({ scope: (id) => ({ [SESSION_SCOPE]: id }) }, 's-1'),
+    T.resolveForgeSessionInput({ scope: (id) => ({ [SESSION_SCOPE]: id }) }, 's-1'),
     sessionInput,
     'the resolver lands the scope ctx that `input.for` accepts',
   );
   assert.equal(
-    mod.__bwTest.resolveForgeSessionInput({ scope: () => undefined }, 's-1'),
+    T.resolveForgeSessionInput({ scope: () => undefined }, 's-1'),
     null,
     'and degrades to null when the session has no scope',
   );
@@ -490,7 +516,7 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
     setDraft() { multiSetDraftCalls += 1; },
     notify() { multiNotices += 1; },
   };
-  const three = [803, 777, 42].map((number) => mod.__bwTest.attachForgeReference({
+  const three = [803, 777, 42].map((number) => T.attachForgeReference({
     item: { host: 'github.com', owner: 'acme', repo: 'widget', number, kind: 'issue', title: `issue ${number}` },
     sessionInput: multiShell,
     fallbackInput: null,
@@ -503,7 +529,7 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
   ], 'each pick uses the exact live detect end, including the third');
   assert.equal(multiState.draft, multiState.occurrences.map((entry) => entry.clipboardText + ' ').join(''),
     'all three stay in self-identifying chip persistence form');
-  assert.deepEqual(multiState.occurrences.map((entry) => mod.__bwTest.decodeForgeRef(entry.ref).number), [803, 777, 42]);
+  assert.deepEqual(multiState.occurrences.map((entry) => T.decodeForgeRef(entry.ref).number), [803, 777, 42]);
   assert.equal(multiState.occurrences.length, 3, 'all three are real chip occurrences');
   assert.equal(multiSetDraftCalls, 0, 'the attach path never expands the draft through setDraft');
   assert.equal(multiNotices, 0, 'successful inserts stay quiet');
@@ -521,14 +547,14 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
     assert.deepEqual(span, { start: 5, end: 5, draftRev: 9 },
       'the span carries the shell’s live rev (a stale render-time rev would fail the CAS)');
     assert.equal(ref.source, 'better-workspaces-forge', 'the reference names our trigger source');
-    assert.deepEqual(mod.__bwTest.decodeForgeRef(ref.ref), {
+    assert.deepEqual(T.decodeForgeRef(ref.ref), {
       version: 1, host: 'github.com', owner: 'acme', repo: 'widget', kind: 'change_request', number: 7,
     }, 'and carries the full immutable forge identity');
     assert.equal(ref.clipboardText, '[[dsh-bw1:https://github.com/acme/widget/pull/7]]', 'persistence carries a readable canonical identity without using the @ trigger');
     assert.ok(ref.label.includes('#7'), `the chip label names the item: ${ref.label}`);
     return true;
   };
-  assert.equal(mod.__bwTest.attachForgeReference({
+  assert.equal(T.attachForgeReference({
     item, sessionInput, fallbackInput: { draft: 'stale', draftRev: 0, occurrences: [] },
   }), true, 'the picked row lands a reference chip');
   assert.equal(setDraftCalls, 0, 'the atomic chip path never mutates the draft as plain text');
@@ -543,26 +569,26 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
     removeItem: (key) => sidecarStorage.delete(key),
   };
   try {
-    const ref = mod.__bwTest.encodeForgeRef(item);
-    const projection = mod.__bwTest.forgeClipboardText(ref);
-    assert.equal(mod.__bwTest.embeddedForgeDraft(projection + ',').references[0].ref, ref,
+    const ref = T.encodeForgeRef(item);
+    const projection = T.forgeClipboardText(ref);
+    assert.equal(T.embeddedForgeDraft(projection + ',').references[0].ref, ref,
       'adjacent punctuation stays outside the canonical URL identity');
-    assert.equal(mod.__bwTest.embeddedForgeDraft('[[dsh-bw1:https://github.com/acme/widget/pull/nope]]').invalid, true);
-    assert.equal(mod.__bwTest.embeddedForgeDraft('[[dsh-bw1:https://github.com/acme/widget/issues/').invalid, true);
-    assert.equal(mod.__bwTest.embeddedForgeDraft('https://github.com/acme/widget/issues/'), null,
+    assert.equal(T.embeddedForgeDraft('[[dsh-bw1:https://github.com/acme/widget/pull/nope]]').invalid, true);
+    assert.equal(T.embeddedForgeDraft('[[dsh-bw1:https://github.com/acme/widget/issues/').invalid, true);
+    assert.equal(T.embeddedForgeDraft('https://github.com/acme/widget/issues/'), null,
       'ordinary pasted Forge URLs are never claimed by this source');
     const malformedProjection = '[[dsh-bw1:https://github.com/acme/widget/pull/nope]]';
-    const malformedRecord = mod.__bwTest.embeddedForgeDraft(malformedProjection);
-    assert.equal(mod.__bwTest.forgeClipboardText(malformedRecord.references[0].ref), malformedProjection,
+    const malformedRecord = T.embeddedForgeDraft(malformedProjection);
+    assert.equal(T.forgeClipboardText(malformedRecord.references[0].ref), malformedProjection,
       'a malformed owner marker can become a deletable invalid chip without losing its text');
     const liveInput = { draft: projection, draftRev: 1, occurrences: [{
       source: 'better-workspaces-forge', ref, offset: 0, length: projection.length,
       label: 'PR #7 wire up the picker', clipboardText: projection,
     }] };
-    mod.__bwTest.writeForgeDraftSidecar('persisted', liveInput);
+    T.writeForgeDraftSidecar('persisted', liveInput);
     const invalidRef = malformedRecord.references[0].ref;
     const mixedStoredDraft = projection + ' ' + malformedProjection;
-    mod.__bwTest.writeForgeDraftSidecar('mixed-stored', {
+    T.writeForgeDraftSidecar('mixed-stored', {
       draft: mixedStoredDraft,
       occurrences: [
         liveInput.occurrences[0],
@@ -570,7 +596,7 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
           length: malformedProjection.length, label: 'broken', clipboardText: malformedProjection },
       ],
     });
-    assert.equal(mod.__bwTest.readForgeDraftSidecar('mixed-stored').references.length, 2,
+    assert.equal(T.readForgeDraftSidecar('mixed-stored').references.length, 2,
       'sidecar persistence retains invalid owned chips alongside valid references');
     sessionInput.snapshot = { draft: projection, draftRev: 2, phase: 'plain', occurrences: [] };
     let rebound = null;
@@ -578,7 +604,7 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
       rev: 2,
       insertReference: (reference, span) => { rebound = { reference, span }; return true; },
     };
-    assert.equal(mod.__bwTest.settleForgeDraftSidecar('persisted', {
+    assert.equal(T.settleForgeDraftSidecar('persisted', {
       draft: projection, draftRev: 2, occurrences: [],
     }, reboundShell), true);
     assert.equal(rebound.reference.ref, ref);
@@ -587,24 +613,24 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
 
     rebound = null;
     sidecarStorage.clear();
-    assert.equal(mod.__bwTest.settleForgeDraftSidecar('transferred', {
+    assert.equal(T.settleForgeDraftSidecar('transferred', {
       draft: projection, draftRev: 3, occurrences: [],
     }, reboundShell), true, 'a Workspace-transferred canonical URL restores without a source-Session sidecar');
     assert.equal(rebound.reference.ref, ref);
 
     rebound = null;
-    assert.equal(mod.__bwTest.settleForgeDraftSidecar('malformed', {
+    assert.equal(T.settleForgeDraftSidecar('malformed', {
       draft: malformedProjection, draftRev: 4, occurrences: [],
     }, reboundShell), true, 'a malformed owned marker is rebound as an invalid, user-deletable chip');
     assert.match(rebound.reference.ref, /^bwi/);
     assert.equal(rebound.reference.clipboardText, malformedProjection);
 
     const issueItem = { ...item, kind: 'issue', number: 8, url: 'https://github.com/acme/widget/issues/8' };
-    const issueRef = mod.__bwTest.encodeForgeRef(issueItem);
-    const issueProjection = mod.__bwTest.forgeClipboardText(issueRef);
+    const issueRef = T.encodeForgeRef(issueItem);
+    const issueProjection = T.forgeClipboardText(issueRef);
     const mixedDraft = projection + ' ' + issueProjection;
     rebound = null;
-    assert.equal(mod.__bwTest.settleForgeDraftSidecar('mixed', {
+    assert.equal(T.settleForgeDraftSidecar('mixed', {
       draft: mixedDraft, draftRev: 5, occurrences: [{
         source: 'better-workspaces-forge', ref, offset: 0, length: projection.length,
         label: 'PR #7 wire up the picker', clipboardText: projection,
@@ -615,7 +641,7 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
 
     const fileProjection = '/tmp/very-long-file.txt';
     rebound = null;
-    assert.equal(mod.__bwTest.settleForgeDraftSidecar('cross-source', {
+    assert.equal(T.settleForgeDraftSidecar('cross-source', {
       draft: fileProjection + ' ' + projection, draftRev: 6, occurrences: [{
         source: 'files', ref: '/tmp/very-long-file.txt', offset: 0, length: fileProjection.length,
         label: 'very-long-file.txt', clipboardText: fileProjection,
@@ -630,7 +656,7 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
   // (f) a refused chip is atomic: draft unchanged, no setDraft, visible notice.
   sessionInput.insertReference = () => false;
   notified = null;
-  assert.equal(mod.__bwTest.attachForgeReference({ item, sessionInput, fallbackInput: null }), false,
+  assert.equal(T.attachForgeReference({ item, sessionInput, fallbackInput: null }), false,
     'a refused attach reports failure');
   assert.equal(setDraftCalls, 0, 'a refused chip never expands into plain text');
   assert.ok(notified, 'the refusal surfaces on the composer notice channel');
@@ -643,7 +669,7 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
   // (f) an exception carries its underlying reason and is still atomic.
   sessionInput.insertReference = () => { throw new Error('composer locked'); };
   notified = null;
-  assert.equal(mod.__bwTest.attachForgeReference({ item, sessionInput, fallbackInput: null }), false,
+  assert.equal(T.attachForgeReference({ item, sessionInput, fallbackInput: null }), false,
     'a thrown attach reports failure');
   assert.equal(setDraftCalls, 0, 'an exception never writes model-form text either');
   assert.match(notified.text, /composer locked/, 'the notice carries the underlying reason');
@@ -657,14 +683,14 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
   };
   sessionInput.insertReference = () => { insertCalls += 1; return true; };
   notified = null;
-  assert.equal(mod.__bwTest.attachForgeReference({ item, sessionInput, fallbackInput: null }), false,
+  assert.equal(T.attachForgeReference({ item, sessionInput, fallbackInput: null }), false,
     'an inconsistent projection is rejected');
   assert.equal(insertCalls, 0, 'no guessed span reaches the editor');
   assert.equal(setDraftCalls, 0, 'and the malformed state leaves the draft untouched');
   assert.ok(notified, 'the malformed projection is visible to the user');
 
   // (h) no shell at all: return false; the caller keeps the picker open.
-  assert.equal(mod.__bwTest.attachForgeReference({
+  assert.equal(T.attachForgeReference({
     item, sessionInput: null,
     fallbackInput: { draft: '', draftRev: 0, phase: 'plain', occurrences: [] },
   }), false, 'a missing shell cannot claim success');
@@ -675,7 +701,7 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
   sessionInput.caretSpan = () => ({ start: 2, end: 2 });
   let chipSpan = null;
   sessionInput.insertReference = (ref, span) => { chipSpan = span; return true; };
-  assert.equal(mod.__bwTest.attachForgeReference({ item, sessionInput, fallbackInput: null }), true,
+  assert.equal(T.attachForgeReference({ item, sessionInput, fallbackInput: null }), true,
     'a mid-text caret still permits an append');
   assert.deepEqual(chipSpan, { start: 5, end: 5, draftRev: 11 },
     'a mid-text caret falls back to the exact draft end instead of splitting text');
@@ -684,7 +710,7 @@ assert.equal(dictionaries.dicts.zh['forge.addIssuePr'], '添加 issue 或 PR');
   // accepted it as "at end" and handed an out-of-range span to the editor.
   sessionInput.caretSpan = () => ({ start: 6, end: 6 });
   chipSpan = null;
-  assert.equal(mod.__bwTest.attachForgeReference({ item, sessionInput, fallbackInput: null }), true,
+  assert.equal(T.attachForgeReference({ item, sessionInput, fallbackInput: null }), true,
     'an over-end caret is normalized rather than refused');
   assert.deepEqual(chipSpan, { start: 5, end: 5, draftRev: 11 },
     'an over-end caret must also fall back to the exact detect end');
@@ -751,8 +777,10 @@ assert.ok(
 );
 
 /* ---------------- diff as an official right-Sidebar page type ---------------- */
-assert.equal(tabTypes.length, 1, 'exactly one right-Sidebar tab type');
-const diffType = tabTypes[0];
+assert.deepEqual(tabTypes.map((type) => type.kind).sort(), ['bw-diff', 'bw-forge', 'bw-worktree'],
+  'one right-Sidebar tab type per page surface');
+const diffType = tabTypes.find((type) => type.kind === 'bw-diff');
+assert.ok(diffType, 'the diff page type is registered');
 assert.equal(diffType.id, 'dsh-better-workspaces/diff');
 assert.equal(diffType.kind, 'bw-diff');
 assert.equal(diffType.priority, 'extension');
@@ -790,12 +818,15 @@ assert.deepEqual(
   [
     ['sidebar.right.pane.tab', 'dsh-better-workspaces/diff'],
     ['sidebar.right.pane.tab.title', 'dsh-better-workspaces/diff'],
+    ['sidebar.right.pane.tab', 'dsh-better-workspaces/worktree'],
+    ['sidebar.right.pane.tab.title', 'dsh-better-workspaces/worktree'],
+    ['sidebar.right.pane.tab', 'dsh-better-workspaces/forge'],
+    ['sidebar.right.pane.tab.title', 'dsh-better-workspaces/forge'],
   ].sort(),
-  'body and chip title register under the definition id',
+  'every page registers its body and chip title under its definition id',
 );
 
 /* ---------------- first-send interception helpers (pure) ---------------- */
-const T = mod.__bwTest;
 assert.ok(T, '__bwTest helpers exported');
 assert.equal(/blocks\.set\([^\n]+, null\)/.test(source), false,
   'composer blocks are cleared with undefined; null is still a live crashing block');
