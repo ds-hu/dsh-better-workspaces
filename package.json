@@ -63,9 +63,10 @@
     "test:mutation": "node test/mutation.mjs",
     "test:client": "node test/client-smoke.mjs && node test/client-react.mjs",
     "test:mount": "node test/mount-check.mjs",
-    "test": "npm run test:host && npm run test:security && npm run test:mutation && npm run test:client && npm run test:mount",
+    "test": "npm run test:host && npm run test:security && npm run test:mutation && npm run test:client && npm run test:surfaces && npm run test:mount",
     "test:pack": "node test/package.mjs",
-    "check": "npm run lint && npm run test && npm run test:pack"
+    "check": "npm run lint && npm run test && npm run test:pack",
+    "test:surfaces": "node test/surfaces.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
