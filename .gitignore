@@ -1,3 +1,9 @@
 node_modules/
 *.log
 .DS_Store
+
+# Client bundles are built by CI (`npm run build:client`); see
+# docs/ARCHITECTURE-modules.md §8. They are never committed and never edited by
+# hand — sources live next to them under packages/<feature>/client/.
+packages/*/lib/client.js
+packages/*/lib/client.js.map

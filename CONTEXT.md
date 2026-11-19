@@ -1,6 +1,6 @@
 # dsh-better-workspaces 上下文
 
-DSH Web GUI 的 git 增强插件：为新会话做 worktree 预备、在侧栏每个工作区标题下呈现该工作副本的 git 徽章、在官方右侧栏提供一个 diff 页签，并让会话可以直接引用 forge 上的 issue 与 PR。本文件是项目领域语言的术语表。
+DSH Web GUI 的 git 增强组合包：由一个组合包、四个互相独立的功能模块行（代码变更 / 新建 worktree / 工作区 Git 状态 / Issue 与 PR）与一个共享内核库组成；每个模块都能在 dsh 原生插件面板里单独开关且互不影响。0.3.x 的单行形态见 ADR 0019。本文件是项目领域语言的术语表。
 
 ## 会话与工作区
 
@@ -17,7 +17,7 @@ _Avoid_: 工作路径、授权路径、当前目录
 _Avoid_: cwd 校验、路径白名单
 
 **预备区（hero）**：
-空白会话在首条消息之前的暂存状态：在此选定工作区、worktree 策略与 agent 预设。worktree 下拉仅出现在这里；选定模式本身不产生任何副作用，选定基分支或 PR 行只是填写暂存表单（见命名式创建）。
+空白会话在首条消息之前的暂存状态：在此选定工作区、worktree 策略与 agent 预设。worktree 下拉仍只出现在输入框上方；选定模式本身不产生任何副作用，选定基分支或 PR 行只是填写暂存表单（见命名式创建）。模块 II 的右侧栏工作树页提供同一套命名式创建，只是没有下拉、整幅面板呈现。
 _Avoid_: 首页、欢迎页
 
 **预备区工作目录（hero cwd）**：
@@ -25,7 +25,7 @@ _Avoid_: 首页、欢迎页
 _Avoid_: hero 路径、默认目录
 
 **命名式创建（named create）**：
-暂存态是一个显式表单：必填的分支名输入框（右侧骰子一键摇出助记名）、基分支选择器、以及「创建」。**点「创建」是唯一触发点**——此后创建 worktree 与工作区并跳转新会话，会话诞生于 worktree 内，首轮工具即落在新目录。命名式创建自身不在创建后迁移源会话；DSH 0.2.1 的 `working_directory` 是另一条路径（见原生 worktree）。打开菜单、浏览分支、选定基分支或 PR 行全部零副作用（ADR 0014）；被遗弃的产物可由显式 abandoned 清理回收。定时任务在宿主尚无 Session lease 时只做崩溃事务恢复，不自动归档。
+暂存态是一个显式表单：必填的分支名输入框（右侧骰子一键摇出助记名）、基分支选择器、以及「创建」；输入框上方的暂存条与右侧栏工作树页渲染同一个表单组件，二者语义完全一致。**点「创建」是唯一触发点**——此后创建 worktree 与工作区并跳转新会话，会话诞生于 worktree 内，首轮工具即落在新目录。命名式创建自身不在创建后迁移源会话；DSH 0.2.1 的 `working_directory` 是另一条路径（见原生 worktree）。打开菜单、浏览分支、选定基分支或 PR 行全部零副作用（ADR 0014）；被遗弃的产物可由显式 abandoned 清理回收。定时任务在宿主尚无 Session lease 时只做崩溃事务恢复，不自动归档。
 _Avoid_: 择基创建、create-on-arm（均为旧触发集合）
 
 **草稿交接（draft handoff）**：
@@ -205,8 +205,16 @@ _Avoid_: 搜索面板
 _Avoid_: 附件、提及
 
 **diff 页签**：
-官方右侧栏里的一个 page 类型（kind `bw-diff`），并注册一个 guide 条目：右侧栏「开始」页上以「代码变更」卡片与官方「工作区文件」并列。因 guide 条目不再唯一，没有历史布局的会话首次打开右侧栏会落在「开始」选择页；无需选页时仍可只走 diff pill（取舍见 ADR 0006 Amendment 1）。
+官方右侧栏里的一个 page 类型（kind `bw-diff`），并注册一个 guide 条目：右侧栏「开始」页上以「代码变更」卡片与官方「工作区文件」并列。因 guide 条目不再唯一，没有历史布局的会话首次打开右侧栏会落在「开始」选择页；无需选页时仍可只走 diff pill（取舍见 ADR 0006 Amendment 1）。它属于模块 I（`bw-diff`）。
 _Avoid_: diff tab（那是已删除的会话视图）
+
+**工作树页面（worktree page）**：
+与代码变更并列的右侧栏 page 类型（kind `bw-worktree`，guide id `worktree`、order 30），模块 II 的第二个界面：承载与输入框上方暂存条完全相同的命名式创建、择基、PR 检出与草稿交接后端，只是版式适配右侧栏（整幅可滚动画板、无 popover、无重复页签 UI）。两个界面由该模块行配置卡片里的两个开关分别启停。
+_Avoid_: 新建页、弹窗（它不是 modal）
+
+**Issue 与 PR 页（forge page）**：
+与代码变更并列的右侧栏 page 类型（kind `bw-forge`，guide id `forge`、order 40），模块 IV 的第二个界面：列出 forge 的 issue 与 PR（读数据面的 `/pulls`、`/pull`），本地筛选、可键盘操作；点一行即把引用 chip 挂到当前草稿并给出就地确认，页面不关闭。与 forge 选择器共用同一套数据与 chip 逻辑，只是不是 modal。
+_Avoid_: forge 面板
 
 **文件编辑器**：
 diff 视图内的文本编辑面板：等宽 textarea、脏标记、Ctrl/Cmd+S；保存走 POST /file 的 sha1 条件写入。同一宿主实例内按规范文件路径串行提交；Linux 以原子交换后的旧 inode 再验预期内容并支持换回回滚，其余平台按平台锚定用 CAS 复查加 rename 原子替换；冲突返回 409，临时文件仅在 inode 仍属本事务时删除。非协作的外部写者不共享这把锁，因此协议承诺以宿主 API 写入的线性化与冲突检测为边界。会话「文件」视图随官方右侧栏「文件」面板下线后，本编辑器只服务 diff 视图。
@@ -241,17 +249,34 @@ _Avoid_: 按钮组
 ## 安装与挂载
 
 **组合包（bundle package）**：
-在 `package.json` 的 `dsh.bundle.patch` 里指向自带 patch 文件的 npm 包；其 patch 成为挂载它的 profile 的一层。`dsh plugin --profile <名> add` 在 pnpm 之后会 reconcile，把这类包自动追加进 `dsh.profile.bundles` —— 这就是「一条命令装完即可用」的全部机制，用户不需要手改 profile 层。
+在 `package.json` 的 `dsh.bundle.patch` 里指向自带 patch 文件的 npm 包；其 patch 成为挂载它的 profile 的一层。`dsh plugin --profile <名> add` 在 pnpm 之后会 reconcile，把这类包自动追加进 `dsh.profile.bundles` —— 这就是「一条命令装完即可用」的全部机制，用户不需要手改 profile 层。0.4.0 起组合包本身不再有宿主半/浏览器半，也不再有 main/exports：它只发 patch、元数据与依赖。
 _Avoid_: npm 包（那是更宽的概念）
 
-**双半包**：
-同一个包同时提供宿主半（`main` → `lib/index.js`，作为 loader 行被挂载）与浏览器半（`exports["./client"]` → `lib/client.js`，由 `dsh.client` 声明、经 `dsh-client-modules` 扫描宿主行后注入页面）。本包既是双半包也声明 `dsh.bundle`：`dsh.bundle` 与 `dsh.client` 是两个独立键，互不冲突。
+**功能模块（feature module / 模块行）**：
+一个可单独开关的 dsh 插件行：独立 npm 包、独立宿主入口、独立浏览器 bundle。本仓库有四个：`bw-diff`（代码变更页）、`bw-worktree`（新建 worktree 两个界面）、`bw-status`（工作区状态徽章与 diff 胶囊）、`bw-forge`（Issue 与 PR 两个界面）。模块之间不允许互相 import、不允许调用对方路由；共用能力只能来自共享内核库。
+_Avoid_: 子模块、组件（那更像 UI 概念）
+
+**模块包（feature package）**：
+同时提供宿主半（`main` → `lib/index.js`，作为 loader 行被挂载）与浏览器半（`exports["./client"]` → `lib/client.js`，由 `dsh.client` 声明、经 `dsh-client-modules` 扫描宿主行后注入页面）的 npm 包。`dsh.client` 只出现在模块包上，绝不与 `dsh.bundle` 同包。
+_Avoid_: 双半包（0.3.x 旧称，那个形态已经拆开）
+
+**共享内核库（core library）**：
+`@ds-hu/dsh-bw-core`：只有宿主库与共享浏览器源码，既声明 `dsh.bundle` 也声明 `dsh.client` 都**没有**，所以绝不会出现在插件面板里、也永远不会被用户关掉。它承载 git 领域逻辑、快照 hub、授权、forge 读取与唯一一条 `/better-workspaces/api` 路由。
+
+**数据面（data plane）**：
+内核持有的只读路由组：`GET /detect`、`POST /snapshots`、`GET /snapshot`、`GET /events`、`GET /pulls`、`GET /pull`。只要还有任意一个模块行存活，它就可用；四个模块都从它取数据，因此每个模块单独开启也能完整工作。`/pulls`、`/pull` 属于数据面而非 forge 模块，是为了让 worktree 模块的 PR 检出与 forge 模块的 PR 界面互不依赖。
+
+**路由组（route group）**：
+宿主路由按模块归属切分的集合（`data`/`diff`/`file`/`actions`/`archive`/`worktree`/`status`）。模块行只认领自己的组；未认领组的请求在授权之前就返回 `404 {"ok":false,"error":"feature module disabled"}`。认领是引用计数的：两条行共享一次挂载，释放在最后一条行卸载时发生。
+
+**模块配置卡片（row config page）**：
+模块行在原生插件面板里的「配置」页，注册在 `plugins.row.config` 插槽、键为 `<组合包名>#<行 id>`。模块 II 与 IV 用它开关各自的第二个界面（偏好存 `localStorage`，拨动即时重新注册）；它是 dsh 原生配置入口，不是自绘的设置页。
 
 **挂载行（mount row）**：
-本包自带 `cordis.patch.yml` 里那一行 insert，是插件出现在组合树里的唯一入口。两条一致性约束：`name` 必须是包名（loader 据此从 profile 的 `node_modules` 解析代码），`id` 必须是宿主半导出的 `name`（一行 = 一个插件实例）；`test/mount-check.mjs` 有守卫。
+组合包自带 `cordis.patch.yml` 里的那四条 insert，是四个模块出现在组合树里的唯一入口。两条一致性约束：`name` 必须是模块包名（loader 据此从 profile 的 `node_modules` 解析代码），`id` 必须是宿主半导出的 `name`（一行 = 一个插件实例，`bw-diff` 等）；`test/package.mjs` 与 `test/mount-check.mjs` 有守卫。
 
 **迁移清理（migration cleanup）**：
-从只声明 `dsh.client` 的旧版本升级时，必须删掉 profile 层里手写的那一行挂载行。`insert` 是原样追加、不按 id 去重，重复 id 由 loader 抛 `duplicate loader entry id` 并 fail-loud —— 两个来源不是「无害的重复」，而是起不来。
+从只声明 `dsh.client` 的旧版本升级时，必须删掉 profile 层里手写的那一行挂载行。`insert` 是原样追加、不按 id 去重，重复 id 由 loader 抛 `duplicate loader entry id` 并 fail-loud —— 两个来源不是「无害的重复」，而是起不来。0.3.x → 0.4.0 的迁移是另一回事：旧行 id `better-workspaces` 消失、四条新 id 出现，profile 里的旧覆盖项成了未知 id（只是警告），应当删除。
 _Avoid_: 兼容处理
 
 **回环受信代理（loopback-trusted reverse proxy）**：

@@ -25,19 +25,19 @@ const scratch = mkdtempSync(join(scratchRoot, 'dsh-bw-test-'));
 process.env.DSH_HOME = join(scratch, 'dshhome');
 mkdirSync(process.env.DSH_HOME, { recursive: true });
 
-const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, withBackgroundGitLane, currentGitLane, statusProbe, currentBranchInfo, headState, listCommits, unpushedShas } = await import('../lib/git.js');
-const { createLane } = await import('../lib/lane.js');
-const { detectRepoCached, resetDiscoveryCache, setDiscoveryClock } = await import('../lib/discovery.js');
-const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, findWorktreeCreation, validateManagedCheckout, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../lib/worktree.js');
-const { computeDiff, commitDiff } = await import('../lib/diff.js');
-const { commitAction, pullAction, pushAction, discardAction, updateFromBaseAction, createPrAction, buildActionLadder } = await import('../lib/actions.js');
-const { createGitStateHub } = await import('../lib/state.js');
-const { createApi, API_PREFIX } = await import('../lib/api.js');
-const { listForgeItems, pullRequestDetail, invalidateGhAuth, invalidateForgeList, ghAvailable, parseGithubRemote, prStatus, prStatusBatch, invalidatePr, createPullRequest, mergePullRequest, disableAutoMerge } = await import('../lib/forge.js');
-const { createCleanupScheduler, createCreationSourceGuard, assertWorkspaceArchivable, deleteWorkspace } = await import('../lib/index.js');
-const { hostMutationCoordinator } = await import('../lib/mutation.js');
-const { createWorkspaceAuthorizer } = await import('../lib/authorize.js');
-const { normalizeGitPath, isFileExchangeSupported } = await import('../lib/stable.js');
+const { detectRepo, resolveDefaultBranch, listBranches, diffStat, porcelainStatus, aheadBehind, runGit, withPinnedGitEnvironment, withBackgroundGitLane, currentGitLane, statusProbe, currentBranchInfo, headState, listCommits, unpushedShas } = await import('../packages/core/lib/git.js');
+const { createLane } = await import('../packages/core/lib/lane.js');
+const { detectRepoCached, resetDiscoveryCache, setDiscoveryClock } = await import('../packages/core/lib/discovery.js');
+const { createWorktree, listManagedWorktrees, readMetadata, patchMetadata, archiveWorktree, prepareWorkspaceDeletion, pendingWorkspaceDeletions, completeWorkspaceDeletion, recoverPendingTransactions, repoWorktreesRoot, worktreesRoot, validateManagedWorktree, findWorktreeCreation, validateManagedCheckout, worktreeRowHasPath, deriveWorktreeLeaf, claimWorktreeCreationSource, releaseWorktreeCreationSource, commitWorktreeCreationReceipt, configureWorktreesBaseDir, defaultWorktreesRoot, managedWorktreesUnder, normalizeWorktreesDir, projectHash } = await import('../packages/core/lib/worktree.js');
+const { computeDiff, commitDiff } = await import('../packages/core/lib/diff.js');
+const { commitAction, pullAction, pushAction, discardAction, updateFromBaseAction, createPrAction, buildActionLadder } = await import('../packages/core/lib/actions.js');
+const { createGitStateHub } = await import('../packages/core/lib/state.js');
+const { createApi, API_GROUPS, API_PREFIX, groupForPath } = await import('../packages/core/lib/api.js');
+const { listForgeItems, pullRequestDetail, invalidateGhAuth, invalidateForgeList, ghAvailable, parseGithubRemote, prStatus, prStatusBatch, invalidatePr, createPullRequest, mergePullRequest, disableAutoMerge } = await import('../packages/core/lib/forge.js');
+const { createCleanupScheduler, createCreationSourceGuard, assertWorkspaceArchivable, deleteWorkspace, acquireRuntime } = await import('../packages/core/lib/index.js');
+const { hostMutationCoordinator } = await import('../packages/core/lib/mutation.js');
+const { createWorkspaceAuthorizer } = await import('../packages/core/lib/authorize.js');
+const { normalizeGitPath, isFileExchangeSupported } = await import('../packages/core/lib/stable.js');
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -2625,7 +2625,7 @@ await test('api serializes same-repo worktree creation and actions', async () =>
       (await pendingWorkspaceDeletions(parallelRepo)).ready.map((entry) => entry.workspaceId),
       ['crash-window-workspace'],
     );
-    const { createCleanup } = await import('../lib/cleanup.js');
+    const { createCleanup } = await import('../packages/core/lib/cleanup.js');
     const replayedDeletes = [];
     const recoveryCleanup = createCleanup({
       get(name) {
@@ -3085,7 +3085,7 @@ await test('forge: PR status isolates host auth, GraphQL calls, and caches', asy
 await test('forge: gh missing from PATH → cli_missing', async () => {
   // `ghAvailable` caches "installed" for the whole process, so the missing-gh
   // case gets its own module instance instead of poisoning the shared one
-  const isolated = await import('../lib/forge.js?gh-missing');
+  const isolated = await import('../packages/core/lib/forge.js?gh-missing');
   const emptyBin = join(scratch, 'empty-bin');
   mkdirSync(emptyBin, { recursive: true });
   const withFakeGH = process.env.PATH;
@@ -3400,7 +3400,7 @@ await test('cleanup revalidates its queued repository capability', async () => {
     },
     acquire: (...args) => hostMutationCoordinator.acquire(...args),
   };
-  const { createCleanup } = await import('../lib/cleanup.js');
+  const { createCleanup } = await import('../packages/core/lib/cleanup.js');
   const cleanup = createCleanup({
     get(name) {
       if (name === 'sessions') return { list: async () => [] };
@@ -3424,7 +3424,7 @@ await test('cleanup revalidates its queued repository capability', async () => {
 });
 
 await test('cleanup sweep: dry-run, guards, archive + workspace delete', async () => {
-  const { createCleanup } = await import('../lib/cleanup.js');
+  const { createCleanup } = await import('../packages/core/lib/cleanup.js');
   const deleted = [];
   const wsEntities = [];
   const registryMock = {
@@ -3555,8 +3555,8 @@ await test('cleanup sweep: dry-run, guards, archive + workspace delete', async (
 });
 
 await test('cleanup abandoned sweep: unreferenced+old only', async () => {
-  const { createCleanup } = await import('../lib/cleanup.js');
-  const { patchMetadata } = await import('../lib/worktree.js');
+  const { createCleanup } = await import('../packages/core/lib/cleanup.js');
+  const { patchMetadata } = await import('../packages/core/lib/worktree.js');
   const deleted = [];
   const wsEntities = [];
   const registryMock = {
@@ -3657,7 +3657,7 @@ await test('cleanup abandoned sweep: unreferenced+old only', async () => {
 /* ---------------- platform anchoring (ADR 0013) ---------------- */
 
 await test('platform anchoring helpers', async () => {
-  const stable = await import('../lib/stable.js');
+  const stable = await import('../packages/core/lib/stable.js');
   try {
     // Git path normalization is shape-driven, independent of the host platform
     assert.equal(stable.normalizeGitPath('C:/Users/x/repo'), 'C:\\Users\\x\\repo');
@@ -3708,7 +3708,7 @@ await test('platform anchoring helpers', async () => {
 });
 
 await test('path mode (simulated win32): discovery, worktree creation, picker, editor save', async () => {
-  const stable = await import('../lib/stable.js');
+  const stable = await import('../packages/core/lib/stable.js');
   const pathRepo = join(scratch, 'path-mode-repo');
   mkdirSync(pathRepo);
   gitInit(pathRepo, '-b', 'main');
@@ -4099,6 +4099,347 @@ await test('the git half of a snapshot is emitted before the forge round trip', 
     await hub.dispose();
     await new Promise((resolveWait) => setTimeout(resolveWait, 200));
     rmSync(splitRepo, { recursive: true, force: true });
+  }
+});
+
+/* ---------------- host split (0.4.0): four rows lease one runtime ----------------
+ * The 0.3.x suite exercised one plugin that owned the hub, the authorizer and
+ * the single webServer prefix route. 0.4.0 ships four Loader rows that can be
+ * switched independently, so these cases mount the real feature entries
+ * against a fake Cordis context and prove the two invariants the split must not
+ * lose: the prefix route/data plane exists once per root, and a row that is not
+ * mounted contributes no routes (404 before any authorization work).
+ */
+const HOST_ROWS = [
+  { id: 'bw-diff', spec: '../packages/diff/lib/index.js', groups: ['diff', 'file', 'actions', 'archive'] },
+  { id: 'bw-worktree', spec: '../packages/worktree/lib/index.js', groups: ['worktree'] },
+  { id: 'bw-status', spec: '../packages/status/lib/index.js', groups: ['status'] },
+  { id: 'bw-forge', spec: '../packages/forge/lib/index.js', groups: [] },
+];
+
+// One representative route per group: 200 when the group is enabled, the
+// disabled-feature 404 when it is not. The paths are the ones the browser
+// surfaces actually call.
+const HOST_GROUP_PROBE = {
+  data: () => `/detect?path=${encodeURIComponent(repo)}`,
+  diff: () => `/diff?cwd=${encodeURIComponent(repo)}`,
+  file: () => `/file?cwd=${encodeURIComponent(repo)}&path=a.txt`,
+  actions: () => `/actions?cwd=${encodeURIComponent(repo)}`,
+  archive: () => `/worktrees/deferred?cwd=${encodeURIComponent(repo)}`,
+  worktree: () => `/branches?cwd=${encodeURIComponent(repo)}`,
+  status: () => '/worktree-workspaces',
+};
+
+// The catalogue is the contract: every advertised "METHOD /path" must resolve
+// back to its group, or the isolation case below would assert against the wrong
+// owner without failing.
+for (const [group, routes] of Object.entries(API_GROUPS)) {
+  for (const route of routes) {
+    const [method, sub] = route.split(' ');
+    assert.equal(groupForPath(method, sub), group, `${route} must belong to ${group}`);
+  }
+}
+assert.equal(groupForPath('GET', '/no-such-route'), null, 'unknown paths are not a feature group');
+
+/**
+ * The smallest fake Cordis context a feature row can mount into. `ctx.root`
+ * is the engine's WeakMap key; the effect list mirrors `ctx.effect` (which
+ * executes its factory immediately in Cordis — the runner below does that),
+ * and `webServer.register` counts registrations so duplicate-route failures
+ * are visible as a number, not a swallowed throw.
+ */
+function createHostContext({ withWebServer = true, registerThrows = false, rows = [{ workspaceId: 'host-ws', path: repo }] } = {}) {
+  const effects = [];
+  const registrations = [];
+  const unregistrations = [];
+  let registerCalls = 0;
+  const webServer = withWebServer ? {
+    register(route) {
+      registerCalls += 1;
+      if (registerThrows) throw new Error('duplicate route');
+      assert.equal(route.kind, 'prefix', 'the host mounts one prefix handler');
+      assert.equal(route.path, API_PREFIX, 'the prefix path stays /better-workspaces/api');
+      registrations.push(route);
+      return () => { unregistrations.push(route); };
+    },
+    registerFallback() {
+      return () => {};
+    },
+    tapIndex(fn) {
+      assert.equal(typeof fn, 'function');
+      return () => {};
+    },
+  } : null;
+  const registry = {
+    list: () => rows,
+    create: async (path, title) => {
+      const row = { workspaceId: `host-created-${rows.length}`, path, title };
+      rows.push(row);
+      return row;
+    },
+    delete: async () => true,
+  };
+  const ctx = {
+    get(name) {
+      if (name === 'webServer') return webServer ?? undefined;
+      if (name === 'workspaceRegistry') return registry;
+      if (name === 'sessions') return { list: async () => [] };
+      return undefined;
+    },
+    on() {
+      return () => {};
+    },
+    effect(factory, label) {
+      effects.push({ factory, label });
+    },
+    logger: { warn() {}, error() {}, info() {} },
+  };
+  ctx.root = ctx;
+  return { ctx, effects, registrations, unregistrations, registry, registerCalls: () => registerCalls };
+}
+
+/** `apply()` one row, then run the effect factories it registered. Returns an idempotent async disposer. */
+async function applyHostRow(host, entry, config) {
+  const start = host.effects.length;
+  entry.apply(host.ctx, config);
+  const disposers = [];
+  try {
+    for (let index = start; index < host.effects.length; index += 1) {
+      const disposer = host.effects[index].factory();
+      if (typeof disposer === 'function') disposers.push(disposer);
+    }
+  } catch (error) {
+    // Cordis would dispose the row's earlier effects on a throw; mirror that.
+    for (const dispose of [...disposers].reverse()) {
+      try { await dispose(); } catch { /* the original failure is the report */ }
+    }
+    throw error;
+  }
+  let disposed = false;
+  return async () => {
+    if (disposed) return;
+    disposed = true;
+    // Cordis disposes a fiber's effects in reverse registration order.
+    for (const dispose of [...disposers].reverse()) await dispose();
+  };
+}
+
+/** Serve the registered prefix route on a loopback port for one case. */
+async function startHostServer(host) {
+  const route = host.registrations[0];
+  assert.ok(route, 'the runtime did not register its prefix route');
+  const server = http.createServer((req, res) => route.handler(req, res));
+  await new Promise((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
+  return {
+    base: `http://127.0.0.1:${server.address().port}${API_PREFIX}`,
+    close: () => new Promise((resolveClose) => {
+      // fetch keeps its sockets alive; without this, close() waits for an idle
+      // keep-alive connection and the case hangs instead of failing.
+      server.closeAllConnections?.();
+      server.close(resolveClose);
+    }),
+  };
+}
+
+/** Read the first SSE frame of `GET /events`, then leave the handler free to dispose. */
+function openHostEventStream(url) {
+  return new Promise((resolveStream, rejectStream) => {
+    const request = http.get(url, (response) => {
+      let received = '';
+      let settled = false;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        if (error) {
+          response.destroy();
+          request.destroy();
+          rejectStream(error);
+          return;
+        }
+        resolveStream({
+          status: response.statusCode,
+          contentType: response.headers['content-type'],
+          body: received,
+          close: () => {
+            response.destroy();
+            request.destroy();
+          },
+        });
+      };
+      response.on('data', (chunk) => {
+        received += chunk.toString('utf8');
+        if (received.includes(':connected')) finish(null);
+      });
+      response.on('error', () => finish(new Error('event stream failed before its first frame')));
+      response.on('end', () => finish(new Error(`event stream ended before its first frame: ${JSON.stringify(received)}`)));
+    });
+    request.on('error', rejectStream);
+    request.setTimeout(10000, () => {
+      request.destroy();
+      rejectStream(new Error('event stream timed out'));
+    });
+  });
+}
+
+await test('host split: each feature row mounts alone and gates only its own route groups', async () => {
+  for (const row of HOST_ROWS) {
+    const host = createHostContext();
+    let disposeRow = null;
+    let server = null;
+    try {
+      const entry = await import(row.spec);
+      assert.equal(entry.name, row.id, `${row.spec} must export the row id as name`);
+      assert.deepEqual([...(entry.inject ?? [])], ['webServer', 'workspaceRegistry'],
+        `${row.id} must wait for the web server and the authorization registry`);
+      disposeRow = await applyHostRow(host, entry, undefined);
+      assert.equal(host.registerCalls(), 1, `${row.id} mounts exactly one prefix route`);
+      server = await startHostServer(host);
+      const enabled = new Set(['data', ...row.groups]);
+      for (const group of Object.keys(API_GROUPS)) {
+        const response = await fetch(server.base + HOST_GROUP_PROBE[group]());
+        const body = await response.json().catch(() => null);
+        if (enabled.has(group)) {
+          assert.equal(response.status, 200, `${row.id}: claimed ${group} route answered ${response.status} ${JSON.stringify(body)}`);
+          assert.equal(body?.ok, true, `${row.id}: claimed ${group} route must answer normally`);
+        } else {
+          assert.equal(response.status, 404, `${row.id}: unclaimed ${group} route must be disabled`);
+          assert.deepEqual(body, { ok: false, error: 'feature module disabled' },
+            `${row.id}: a disabled group is a feature-module 404, not an authorization answer`);
+        }
+      }
+    } finally {
+      await disposeRow?.();
+      await server?.close();
+    }
+    assert.equal(host.unregistrations.length, 1, `${row.id}: the last lease unregisters the prefix`);
+  }
+});
+
+await test('host split: the four rows share one prefix route and the always-on data plane', async () => {
+  const host = createHostContext();
+  const disposers = [];
+  let server = null;
+  let stream = null;
+  try {
+    for (const row of HOST_ROWS) {
+      const entry = await import(row.spec);
+      disposers.push(await applyHostRow(host, entry, undefined));
+    }
+    assert.equal(host.registerCalls(), 1, 'four rows must not register four prefix routes');
+    assert.equal(host.registrations.length, 1);
+    server = await startHostServer(host);
+
+    // The data plane is not owned by any one row: with all four mounted it is
+    // live, and it is still live with only the route-less row mounted (case 1).
+    const detects = await fetch(`${server.base}/detect?path=${encodeURIComponent(repo)}`);
+    assert.equal(detects.status, 200);
+    assert.equal((await detects.json()).isGit, true, 'the always-on data plane answers');
+
+    stream = await openHostEventStream(`${server.base}/events`);
+    assert.equal(stream.status, 200);
+    assert.match(String(stream.contentType), /text\/event-stream/);
+    assert.match(stream.body, /:connected/, 'the SSE data plane is served by the shared route');
+
+    // Disposing one row removes exactly its groups; the prefix and the other
+    // rows stay mounted.
+    const [disposeDiff, disposeWorktree] = disposers;
+    await disposeDiff();
+    const disabledDiff = await fetch(`${server.base}/diff?cwd=${encodeURIComponent(repo)}`);
+    assert.equal(disabledDiff.status, 404);
+    assert.deepEqual(await disabledDiff.json(), { ok: false, error: 'feature module disabled' },
+      'disposing bw-diff disables its whole group set');
+    const disabledFile = await fetch(`${server.base}/file?cwd=${encodeURIComponent(repo)}&path=a.txt`);
+    assert.equal(disabledFile.status, 404, 'sibling groups of the disposed row are disabled too');
+    const worktreeAlive = await fetch(`${server.base}/branches?cwd=${encodeURIComponent(repo)}`);
+    assert.equal(worktreeAlive.status, 200, 'a remaining row keeps its own route');
+    const statusAlive = await fetch(`${server.base}/worktree-workspaces`);
+    assert.equal(statusAlive.status, 200);
+    assert.equal(host.unregistrations.length, 0, 'disposing rows must not unregister the shared prefix');
+
+    await disposeWorktree();
+    const worktreeGone = await fetch(`${server.base}/branches?cwd=${encodeURIComponent(repo)}`);
+    assert.equal(worktreeGone.status, 404);
+    const statusStillAlive = await fetch(`${server.base}/worktree-workspaces`);
+    assert.equal(statusStillAlive.status, 200);
+    assert.equal(host.unregistrations.length, 0);
+  } finally {
+    stream?.close();
+    for (const dispose of [...disposers].reverse()) await dispose();
+    await server?.close();
+  }
+  assert.equal(host.unregistrations.length, 1, 'the last row disposal unregisters the prefix exactly once');
+});
+
+await test('host split: the last runtime lease unregisters once and disposes the hub', async () => {
+  const host = createHostContext();
+  const intervals = new Set();
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  globalThis.setInterval = (...args) => {
+    const token = originalSetInterval(...args);
+    intervals.add(token);
+    return token;
+  };
+  globalThis.clearInterval = (token) => {
+    intervals.delete(token);
+    return originalClearInterval(token);
+  };
+  let first = null;
+  let second = null;
+  try {
+    first = acquireRuntime(host.ctx, {});
+    second = acquireRuntime(host.ctx, {});
+    assert.equal(host.registerCalls(), 1, 'two leases share one runtime and one prefix route');
+    assert.equal(first.hub, second.hub, 'two leases in one process must share one git-state hub');
+    assert.equal(first.cleanup, second.cleanup, 'and one cleanup function');
+    assert.ok(intervals.size >= 4, `the hub and API start their housekeeping intervals (saw ${intervals.size})`);
+    first.release();
+    assert.equal(host.unregistrations.length, 0, 'a release with another lease left keeps the route mounted');
+    assert.ok(intervals.size >= 4, 'and keeps the hub alive');
+    await second.release();
+    assert.equal(host.unregistrations.length, 1, 'the last release unregisters the prefix exactly once');
+    assert.equal(intervals.size, 0, 'the last release disposes the hub and API timers');
+    second.release();
+    first.release();
+    assert.equal(host.unregistrations.length, 1, 'releasing an already-released lease is a no-op');
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    await first?.release?.();
+    await second?.release?.();
+  }
+});
+
+await test('host split: conflicting worktreesDir across rows fails the mount by name', async () => {
+  const configured = join(scratch, 'host-worktrees');
+  const conflicting = join(scratch, 'host-worktrees-other');
+  const host = createHostContext({ withWebServer: false });
+  let first = null;
+  let second = null;
+  let third = null;
+  try {
+    // A row without the key pins nothing: bw-diff mounts first in a real
+    // profile, while the config is written on bw-worktree.
+    first = acquireRuntime(host.ctx, {});
+    second = acquireRuntime(host.ctx, { worktreesDir: configured });
+    assert.equal(worktreesRoot(), resolve(configured), 'the first non-null worktreesDir fixes the base');
+    third = acquireRuntime(host.ctx, { worktreesDir: configured });
+    assert.throws(
+      () => acquireRuntime(host.ctx, { worktreesDir: conflicting }),
+      /worktreesDir/,
+      'two rows disagreeing about the managed namespace must fail the mount loudly',
+    );
+    assert.throws(
+      () => acquireRuntime(host.ctx, { worktreeDir: configured }),
+      /unknown plugin config key/,
+      'a misspelled key must fail loudly: ignoring it would move worktrees silently',
+    );
+    assert.equal(worktreesRoot(), resolve(configured), 'a refused config cannot change the fixed base');
+  } finally {
+    await third?.release?.();
+    await second?.release?.();
+    await first?.release?.();
+    configureWorktreesBaseDir(null);
   }
 });
 

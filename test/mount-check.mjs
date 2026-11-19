@@ -1,13 +1,19 @@
 /* mount-check.mjs — reproduce the cordis host mount outside dsh.
  *
- * Cold-boot mounts have failed silently once (row rolled back, routes 404);
- * the loader swallows the throw from stdout. This script imports every host
- * module and runs apply() against a minimal fake ctx — first dormant (no
- * webServer), then with a fake webServer — printing any throw verbatim so
- * the exact cold-boot failure mode is visible without restarting dsh.
+ * Cold-boot mounts have failed silently once (row rolled back, routes 404); the
+ * loader swallows the throw from stdout. This script imports every host module
+ * and every feature row, then runs each `apply()` against a minimal fake ctx —
+ * first dormant (no webServer), then with a fake webServer — printing any throw
+ * verbatim so the exact cold-boot failure mode is visible without restarting
+ * dsh.
+ *
+ * 0.4.0 has four rows over one shared core runtime instead of one plugin, so
+ * the additional invariant is structural: any subset of rows may mount, every
+ * subset registers the prefix route exactly once, and the last disposal
+ * unregisters it exactly once.
  */
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -18,15 +24,20 @@ process.env.DSH_HOME = join(mkdtempSync(join(tmpdir(), 'dsh-bw-mount-home-')), '
 mkdirSync(process.env.DSH_HOME, { recursive: true });
 
 const MODULES = [
-  '../lib/git.js',
-  '../lib/diff.js',
-  '../lib/worktree.js',
-  '../lib/cleanup.js',
-  '../lib/state.js',
-  '../lib/actions.js',
-  '../lib/forge.js',
-  '../lib/api.js',
-  '../lib/index.js',
+  '../packages/core/lib/git.js',
+  '../packages/core/lib/diff.js',
+  '../packages/core/lib/worktree.js',
+  '../packages/core/lib/cleanup.js',
+  '../packages/core/lib/state.js',
+  '../packages/core/lib/actions.js',
+  '../packages/core/lib/forge.js',
+  '../packages/core/lib/api.js',
+  '../packages/core/lib/engine.js',
+  '../packages/core/lib/index.js',
+  '../packages/diff/lib/index.js',
+  '../packages/worktree/lib/index.js',
+  '../packages/status/lib/index.js',
+  '../packages/forge/lib/index.js',
 ];
 
 for (const spec of MODULES) {
@@ -39,21 +50,79 @@ for (const spec of MODULES) {
   }
 }
 
-// Same module instance the mount configures, so the assertions below observe
+// Same module instances the mount configures, so the assertions below observe
 // the real override rather than a fresh copy.
-const { defaultWorktreesRoot, worktreesRoot } = await import('../lib/worktree.js');
-const { createGitStateHub } = await import('../lib/state.js');
+const core = await import('../packages/core/lib/index.js');
+const { configureWorktreesBaseDir, defaultWorktreesRoot, worktreesRoot } = await import('../packages/core/lib/worktree.js');
+const { createGitStateHub } = await import('../packages/core/lib/state.js');
 
+/** The four Loader rows, by the id `cordis.patch.yml` inserts and the host half exports. */
+const ROWS = [
+  { id: 'bw-diff', module: await import('../packages/diff/lib/index.js') },
+  { id: 'bw-worktree', module: await import('../packages/worktree/lib/index.js') },
+  { id: 'bw-status', module: await import('../packages/status/lib/index.js') },
+  { id: 'bw-forge', module: await import('../packages/forge/lib/index.js') },
+];
+
+/* ---------------- core is a library, never a Loader row ----------------
+ * `@ds-hu/dsh-bw-core` has no `dsh.bundle`/`dsh.client`, so the panel cannot
+ * switch it. A stray `apply`/`name`/`inject` export would let the Loader mount
+ * it as a row and bypass the four-way switch entirely.
+ */
+for (const absent of ['apply', 'name', 'inject']) {
+  assert.equal(absent in core, false, `core must not export "${absent}": it is a library, not a row`);
+}
+for (const helper of ['createCleanupScheduler', 'createCreationSourceGuard', 'assertWorkspaceArchivable', 'deleteWorkspace', 'readWorktreesDirConfig', 'acquireRuntime', 'createApi', 'groupForPath']) {
+  assert.equal(typeof core[helper], 'function', `core must export the ${helper} host helper`);
+}
+assert.equal(core.API_PREFIX, '/better-workspaces/api', 'the one prefix survives the split');
+assert.ok(Object.isFrozen(core.API_GROUPS), 'API_GROUPS is the frozen route-group contract');
+for (const [group, routes] of Object.entries(core.API_GROUPS)) {
+  assert.ok(Object.isFrozen(routes), `API_GROUPS.${group} must be frozen`);
+  for (const route of routes) {
+    const [method, sub] = route.split(' ');
+    assert.equal(core.groupForPath(method, sub), group, `${route} must resolve back to group ${group}`);
+  }
+}
+console.log(`core surface ok: ${Object.keys(core.API_GROUPS).length} route groups`);
+
+/* ---------------- row parity: name must equal the patch row id ----------------
+ * The Loader resolves the package from the row's `name`, while the row's `id` is
+ * matched against the host half's exported `name` (docs §2). A drift between the
+ * three silently leaves the row mounted twice or never.
+ */
+for (const row of ROWS) {
+  assert.equal(row.module.name, row.id, `the ${row.id} host half must export name = "${row.id}"`);
+  assert.deepEqual(
+    [...(row.module.inject ?? [])],
+    ['webServer', 'workspaceRegistry'],
+    `${row.id} must wait for the web server and its authorization registry`,
+  );
+  assert.equal(typeof row.module.apply, 'function', `${row.id} must export apply()`);
+}
+console.log('row parity ok');
+
+/**
+ * A minimal Cordis context: `ctx.root` is the engine's WeakMap key, `effect`
+ * records the factory (the mount runner below executes it, as Cordis does
+ * immediately), and `webServer.register` counts requests for the prefix route.
+ */
 function fakeCtx({ withWebServer, registerThrows = false }) {
   const effects = [];
   const logs = [];
+  const routes = [];
+  const unregistered = [];
+  const server = { registerThrows };
+  let registerCalls = 0;
   const webServer = withWebServer
     ? {
         register(route) {
+          registerCalls += 1;
           assert.equal(route.kind, 'prefix');
-          assert.equal(route.path, '/better-workspaces/api');
-          if (registerThrows) throw new Error('duplicate route');
-          return () => {};
+          assert.equal(route.path, core.API_PREFIX);
+          if (server.registerThrows) throw new Error('duplicate route');
+          routes.push(route);
+          return () => { unregistered.push(route); };
         },
         registerFallback() {
           return () => {};
@@ -64,326 +133,177 @@ function fakeCtx({ withWebServer, registerThrows = false }) {
         },
       }
     : undefined;
-  return {
-    ctx: {
-      get(name) {
-        if (name === 'webServer') return webServer;
-        if (name === 'workspaceRegistry') return { list: () => [] };
-        return undefined; // every optional service absent → dormant/degraded paths
-      },
-      on() {
-        return () => {};
-      },
-      effect(fn, label) {
-        effects.push({ label, factory: fn });
-        return () => {};
-      },
-      logger: {
-        warn: (...a) => logs.push(['warn', ...a]),
-        error: (...a) => logs.push(['error', ...a]),
-        info: (...a) => logs.push(['info', ...a]),
-      },
+  const ctx = {
+    get(name) {
+      if (name === 'webServer') return webServer;
+      if (name === 'workspaceRegistry') return { list: () => [] };
+      if (name === 'sessions') return { list: async () => [] };
+      return undefined; // every optional service absent → dormant/degraded paths
     },
-    effects,
-    logs,
+    on() {
+      return () => {};
+    },
+    effect(fn, label) {
+      effects.push({ label, factory: fn });
+      return () => {};
+    },
+    logger: {
+      warn: (...a) => logs.push(['warn', ...a]),
+      error: (...a) => logs.push(['error', ...a]),
+      info: (...a) => logs.push(['info', ...a]),
+    },
   };
+  ctx.root = ctx;
+  return { ctx, effects, logs, routes, unregistered, server, registerCalls: () => registerCalls };
 }
 
-const plugin = await import('../lib/index.js');
-
-// Cold-boot/security regression guard: routes need both the server and the
-// durable Workspace registry. Without either hard dependency the plugin could
-// mount dormant or authorize against an empty/fail-open source.
-assert.deepEqual(
-  [...(plugin.inject ?? [])],
-  ['webServer', 'workspaceRegistry'],
-  'host plugin must wait for webServer and its authorization registry',
-);
-
-/* ---------------- bundle wiring: `dsh plugin add` is the whole install --------
- * The package must declare `dsh.bundle.patch`, or the dsh CLI installs it as a
- * plain profile dependency, prints a warning, and never lists it in
- * `dsh.profile.bundles` — the row never reaches the composition, so every GUI
- * surface silently disappears (the ADR 0005 failure mode, one layer earlier).
- * The row the patch contributes must name this package (module resolution
- * anchors on it) and carry the id the host half exports (one plugin, one row).
- */
-const packageRoot = new URL('..', import.meta.url);
-const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), 'utf8'));
-
-const declaredPatch = manifest.dsh?.bundle?.patch;
-assert.ok(
-  declaredPatch,
-  'package.json must declare dsh.bundle.patch or `dsh plugin --profile <p> add` only installs a plain dependency (no row, no mount)',
-);
-assert.ok(
-  manifest.files?.includes(declaredPatch.replace(/^\.\//, '')),
-  `package.json files must ship ${declaredPatch}: an npm publish would otherwise drop the only mount row`,
-);
-
-/* ---------------- client inject: a contract, not a comment ----------------
- * `dsh.client.inject` is forwarded verbatim as the browser fiber's cordis
- * `inject` list, so an entry nobody reads is a pure load-order wait edge, while
- * a *missing* entry is a race: the client half resolves `conversation`,
- * `uiSession`, `uiWorkspace` and `sidebarRight` lazily at render time.
- *
- * Packages that only arrive transitively (api-remotes, api-session-controller,
- * api-workspace-controller, client-connection, client-locale, ui-sidebar) are
- * deliberately NOT listed — they are already in the ui-workspace /
- * ui-conversation / ui-session dependency closure, and the loader walks those
- * edges before materializing the consumer.
- */
-const clientSource = readFileSync(new URL('lib/client.js', packageRoot), 'utf8');
-const resolvedServices = new Set(
-  [...clientSource.matchAll(/(?:appCtx|[A-Za-z_$][\w$]*)\.get\("([a-zA-Z]+)"\)/g)].map((m) => m[1]),
-);
-// A client package registers a service either by extending the Service base
-// class (`super(ctx, "<name>")`) or through the context reflector
-// (`ctx.reflect.provide("<name>", impl)`). Both forms appear in the official
-// packages this plugin injects, so both must be recognized.
-const PROVIDES = /super\(\s*[A-Za-z_$][\w$]*\s*,\s*"([a-zA-Z]+)"\)|reflect\.provide\(\s*"([a-zA-Z]+)"/g;
-
-/** Service names a client bundle registers. */
-function providedServices(source) {
-  return [...source.matchAll(PROVIDES)].map((match) => match[1] ?? match[2]);
-}
-
-/**
- * Check one inject list against the client half's service reads. `resolve` maps
- * a package name to its directory, so the negative cases below run on stubs
- * without an installed dsh; an unresolvable entry is skipped, because CI
- * installs only this package.
- */
-function checkInject(injectList, resolve) {
-  const errors = [];
-  const provided = new Set();
-  let inspected = 0;
-  for (const entry of injectList) {
-    const dir = resolve(entry);
-    if (dir === null) continue;
-    const clientEntry = new URL('lib/client.js', dir);
-    if (!existsSync(clientEntry)) continue;
-    inspected += 1;
-    const services = providedServices(readFileSync(clientEntry, 'utf8'));
-    if (!services.some((service) => resolvedServices.has(service))) {
-      errors.push(
-        `dsh.client.inject lists ${entry}, but it provides none of the services the client half resolves `
-          + `(${[...resolvedServices].join(', ')}); a load-order edge nobody reads is dead wiring`,
-      );
+/** Run the effect factories appended since `since`, returning their disposers in registration order. */
+function runEffects(fake, since = 0) {
+  const disposers = [];
+  for (let index = since; index < fake.effects.length; index += 1) {
+    const entry = fake.effects[index];
+    let disposer;
+    try {
+      disposer = entry.factory();
+    } catch (error) {
+      throw new Error(`EFFECT FAIL [${entry.label}]\n${error?.stack ?? error}`, { cause: error });
     }
-    // NB: `Set.add` takes one argument — spreading this array would silently keep
-    // only its first service and report the rest as unprovided.
-    for (const service of services) provided.add(service);
+    if (typeof disposer === 'function') disposers.push(disposer);
   }
-  return { errors, inspected, provided };
+  return disposers;
 }
 
-/**
- * The converse rule: every service the client half reads must be reachable from
- * a declared entry, or the read races that package's arrival. Separate from
- * {@link checkInject} so the per-entry rule can be exercised on a stub covering
- * one service rather than all four.
+/** Cordis disposes a fiber's effects in reverse registration order. */
+async function disposeEffects(disposers) {
+  for (const dispose of [...disposers].reverse()) await dispose();
+}
+
+/** Mount one row on `fake` and return its disposers (still mounted). */
+function mountRow(fake, row, config) {
+  const since = fake.effects.length;
+  row.module.apply(fake.ctx, config);
+  return runEffects(fake, since);
+}
+
+/* ---------------- dormant and live mounts, one row at a time ----------------
+ * Every row must mount against a ctx without webServer (cold boot re-activates
+ * it later; a throw here rolls the row back) and against one with webServer
+ * (exactly one prefix registration). Disposal must release it.
  */
-function missingServiceErrors(provided, inspectable) {
-  if (!inspectable) return [];
-  return [...resolvedServices]
-    .filter((service) => !provided.has(service))
-    .map((service) => `the client half resolves "${service}", but no dsh.client.inject entry provides it: `
-      + 'the read would race that package\'s arrival');
-}
-
-/** Walk up from the repo so the check runs both in CI and inside a dsh install. */
-function nodeModulesRoots() {
-  const roots = [];
-  let dir = new URL('.', packageRoot);
-  for (let depth = 0; depth < 6; depth += 1) {
-    const candidate = new URL('node_modules/', dir);
-    if (existsSync(candidate)) roots.push(candidate);
-    const parent = new URL('../', dir);
-    if (parent.href === dir.href) break;
-    dir = parent;
+for (const row of ROWS) {
+  for (const withWebServer of [false, true]) {
+    const fake = fakeCtx({ withWebServer });
+    const disposers = [];
+    try {
+      disposers.push(...mountRow(fake, row));
+      assert.equal(fake.registerCalls(), withWebServer ? 1 : 0, `${row.id} webServer=${withWebServer}: registration count`);
+      assert.equal(fake.routes.length, withWebServer ? 1 : 0, `${row.id} webServer=${withWebServer}: mounted routes`);
+      if (withWebServer) {
+        // Claimed-groups-only: data is always on, every other group is off.
+        assert.ok(fake.routes[0], 'the prefix route object exists');
+      }
+      console.log(`apply ok (${row.id}, webServer=${withWebServer}); effects=${disposers.length}; logs=${JSON.stringify(fake.logs)}`);
+    } finally {
+      await disposeEffects(disposers);
+    }
+    if (withWebServer) {
+      assert.equal(fake.unregistered.length, 1, `${row.id}: last disposal must unregister the prefix once`);
+    }
   }
-  return roots;
-}
-function packageDir(name) {
-  for (const root of nodeModulesRoots()) {
-    const candidate = new URL(`${name}/`, root);
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
 }
 
-const injectList = manifest.dsh?.client?.inject ?? [];
-assert.ok(injectList.length > 0, 'dsh.client.inject must declare the services the client half resolves');
-
-const live = checkInject(injectList, packageDir);
-assert.deepEqual(live.errors, [], live.errors.join('\n'));
-assert.deepEqual(
-  missingServiceErrors(live.provided, live.inspected > 0),
-  [],
-  'every service the client half resolves must be provided by a declared entry',
-);
-if (live.inspected > 0) {
-  console.log(`inject check ok: ${injectList.length} declared, ${live.inspected} inspected, ${resolvedServices.size} services resolved`);
-} else {
-  console.log('inject check: no client packages installed here; exercising the rule on stubs instead');
-}
-
-/* The rule must actually bite, in both directions. Stub one entry that provides
- * a service the client reads, and one that provides nothing it reads: the
- * second is exactly the "comment pretending to be a dependency" this guards. */
+/* ---------------- all four rows together: one prefix, no duplicate route ----------------
+ * Four rows in one Cordis root is the whole point of 0.4.0; the failure mode is
+ * a second `webServer.register` throwing "duplicate route" during cold boot.
+ */
 {
-  const stubRoot = mkdtempSync(join(tmpdir(), 'dsh-bw-inject-'));
-  const write = (name, service) => {
-    mkdirSync(join(stubRoot, name, 'lib'), { recursive: true });
-    writeFileSync(
-      join(stubRoot, name, 'lib', 'client.js'),
-      `window.__ModuleLoader__.load({ id: "${name}", factory: () => {\n`
-        + `\tclass X { constructor(ctx) { super(ctx, "${service}"); } }\n} });\n`,
-    );
-  };
-  write('stub-provider', 'uiSession');
-  write('stub-bystander', 'shoppingCart');
-  // the reflector form must be recognized too, or a real provider reads as a bystander
-  const writeReflector = (name, service) => {
-    mkdirSync(join(stubRoot, name, 'lib'), { recursive: true });
-    writeFileSync(
-      join(stubRoot, name, 'lib', 'client.js'),
-      `window.__ModuleLoader__.load({ id: "${name}", factory: (require) => {\n`
-        + `\tconst apply = (ctx) => ctx.reflect.provide("${service}", {});\n} });\n`,
-    );
-  };
-  writeReflector('stub-reflector', 'sidebarRight');
-  const stubResolve = (name) => (existsSync(join(stubRoot, name)) ? new URL(`file://${join(stubRoot, name)}/`) : null);
+  const fake = fakeCtx({ withWebServer: true });
+  const disposersByRow = [];
+  for (const row of ROWS) disposersByRow.push(mountRow(fake, row));
+  assert.equal(fake.registerCalls(), 1, 'four rows must share exactly one prefix registration');
+  assert.equal(fake.routes.length, 1, 'four rows must not mount four routes');
+  console.log(`four-row mount ok: registrations=${fake.registerCalls()}, effects=${fake.effects.length}`);
 
-  const good = checkInject(['stub-provider'], stubResolve);
-  assert.equal(good.inspected, 1, 'the stub package must be found and read');
-  assert.deepEqual(good.errors, [], `a provider of a resolved service must pass: ${good.errors.join('; ')}`);
+  // A row with no routes still owns a lease: dispose it and the shared prefix
+  // must survive for the other three.
+  const forgeDisposers = disposersByRow[disposersByRow.length - 1];
+  await disposeEffects(forgeDisposers);
+  assert.equal(fake.unregistered.length, 0, 'disposing the route-less row must not unregister the shared prefix');
 
-  const reflective = checkInject(['stub-reflector'], stubResolve);
-  assert.deepEqual(
-    reflective.errors,
-    [],
-    `ctx.reflect.provide must count as providing a service: ${reflective.errors.join('; ')}`,
-  );
-
-  const noisy = checkInject(['stub-provider', 'stub-bystander'], stubResolve);
-  assert.equal(noisy.errors.length, 1, 'exactly the unread entry must be reported');
-  assert.match(noisy.errors[0], /stub-bystander.*provides none/s);
-
-  const missing = missingServiceErrors(good.provided, true);
-  assert.ok(
-    missing.some((e) => /resolves "uiWorkspace".*no dsh\.client\.inject entry provides it/s.test(e)),
-    'a service no entry provides must be reported as a missing entry',
-  );
-  assert.deepEqual(missingServiceErrors(good.provided, false), [], 'an uninspectable install reports nothing');
-
-  rmSync(stubRoot, { recursive: true, force: true });
-}
-
-const patchSource = readFileSync(new URL(declaredPatch, packageRoot), 'utf8');
-assert.match(patchSource, /^\s*-\s*insert:/m, `${declaredPatch} must contribute a top-level insert list`);
-
-/* Exactly one row, and it must not be a second copy of a row a profile layer
- * already carries: the include inserts verbatim and the Loader throws on a
- * repeated entry id, so "bundle layer + hand-written row" is a boot failure
- * rather than a harmless duplicate. */
-const rows = [...patchSource.matchAll(/^\s*-\s*id:\s*(\S+)\s*\n\s*name:\s*(?:'([^']+)'|"([^"]+)"|(\S+))\s*$/gm)].map((match) => ({
-  id: match[1],
-  name: match[2] ?? match[3] ?? match[4],
-}));
-assert.equal(rows.length, 1, `${declaredPatch} must contribute exactly one row, found ${rows.length}`);
-assert.equal(rows[0].name, manifest.name, 'the row must mount this package by name');
-assert.equal(rows[0].id, plugin.name, 'the row id must match the name the host half exports');
-
-const readme = readFileSync(new URL('README.md', packageRoot), 'utf8');
-assert.match(
-  readme,
-  /docs\/TECHNICAL\.md/,
-  'README must link to the technical documentation',
-);
-const technical = readFileSync(new URL('docs/TECHNICAL.md', packageRoot), 'utf8');
-assert.match(
-  technical,
-  /duplicate loader entry id/,
-  'TECHNICAL.md must document the pre-bundle upgrade cleanup and its duplicate-id symptom',
-);
-
-for (const withWebServer of [false, true]) {
-  const { ctx, effects, logs } = fakeCtx({ withWebServer });
-  try {
-    const dispose = plugin.apply(ctx);
-    // run every registered effect body (timers, sweeps, route registration),
-    // then its disposer so no boot timer keeps the process alive
-    for (const entry of effects) {
-      let disposer = null;
-      try {
-        disposer = entry.factory();
-      } catch (e) {
-        console.log(`EFFECT FAIL [${entry.label}] webServer=${withWebServer}\n${e && e.stack ? e.stack : e}`);
-        process.exit(1);
-      }
-      if (typeof disposer === 'function') {
-        try {
-          await disposer();
-        } catch (e) {
-          console.log(`EFFECT DISPOSE FAIL [${entry.label}]\n${e && e.stack ? e.stack : e}`);
-          process.exit(1);
-        }
-      }
-    }
-    if (typeof dispose === 'function') dispose();
-    console.log(`apply ok (webServer=${withWebServer}); effects=${effects.length}; logs=${JSON.stringify(logs)}`);
-  } catch (e) {
-    console.log(`APPLY FAIL (webServer=${withWebServer})\n${e && e.stack ? e.stack : e}`);
-    process.exit(1);
-  }
+  for (const disposers of [...disposersByRow.slice(0, -1)].reverse()) await disposeEffects(disposers);
+  assert.equal(fake.unregistered.length, 1, 'the last row disposal unregisters the prefix exactly once');
 }
 
 /* ---------------- worktreesDir config (ADR 0017) ----------------
- * The row's `config` is the only way to move the managed namespace, so the
- * mount must honour it, restore the built-in base when the key disappears (a
- * live config change re-applies the row without it), and refuse a value it
- * cannot honour instead of silently falling back to a different directory.
+ * The rows accept the same optional config, but one Cordis root has one managed
+ * namespace: the first non-null value wins, a repeat is harmless, a disagreement
+ * is a mount error. An unconfigured mount must restore the built-in base.
  */
 {
+  const worktreeRow = ROWS.find((row) => row.id === 'bw-worktree');
+  const diffRow = ROWS.find((row) => row.id === 'bw-diff');
   const configuredBase = join(tmpdir(), `dsh-bw-base-${process.pid}`);
-  // Every apply() starts the state hub's tick/prune intervals, so a mount that
-  // is not disposed keeps the event loop (and therefore this script) alive
-  // after the last assertion. Dispose exactly as the loop above does.
-  const mount = async (config) => {
+
+  const mountOne = async (row, config) => {
     const fake = fakeCtx({ withWebServer: false });
-    try {
-      plugin.apply(fake.ctx, config);
-    } finally {
-      for (const entry of fake.effects) {
-        let disposer = null;
-        try {
-          disposer = entry.factory();
-        } finally {
-          if (typeof disposer === 'function') await disposer();
-        }
-      }
-    }
+    const disposers = mountRow(fake, row, config);
+    return () => disposeEffects(disposers);
   };
 
-  await mount({ worktreesDir: configuredBase });
+  await (await mountOne(worktreeRow, { worktreesDir: configuredBase }))();
   assert.equal(worktreesRoot(), resolve(configuredBase), 'a configured worktreesDir becomes the managed base');
-  await mount(undefined);
+  await (await mountOne(worktreeRow, undefined))();
   assert.equal(worktreesRoot(), defaultWorktreesRoot(), 'an unconfigured mount restores the built-in base');
 
-  await assert.rejects(mount({ worktreesDir: 'relative/dir' }), /worktreesDir must be an absolute path/);
+  // bw-diff mounts before bw-worktree in a real profile; the config on the
+  // later row must still fix the base for the whole root.
+  {
+    const fake = fakeCtx({ withWebServer: false });
+    const disposers = [
+      ...mountRow(fake, diffRow),
+      ...mountRow(fake, worktreeRow, { worktreesDir: configuredBase }),
+    ];
+    assert.equal(worktreesRoot(), resolve(configuredBase), 'a later row may be the one carrying the config');
+    await disposeEffects(disposers);
+  }
+
+  // Two rows disagreeing is a boot failure, not a coin toss.
+  {
+    const fake = fakeCtx({ withWebServer: false });
+    const disposers = mountRow(fake, diffRow, { worktreesDir: configuredBase });
+    try {
+      assert.throws(
+        () => mountRow(fake, worktreeRow, { worktreesDir: join(tmpdir(), `dsh-bw-other-${process.pid}`) }),
+        /worktreesDir/,
+        'two rows disagreeing about the managed namespace must fail the mount',
+      );
+    } finally {
+      await disposeEffects(disposers);
+    }
+  }
+
+  // Restore the built-in base so the next block observes a clean module state.
+  configureWorktreesBaseDir(null);
+  console.log('worktreesDir config ok');
+}
+
+/* ---------------- invalid config is refused at mount, never half-applied ---------------- */
+{
+  const worktreeRow = ROWS.find((row) => row.id === 'bw-worktree');
+  assert.throws(
+    () => mountRow(fakeCtx({ withWebServer: false }), worktreeRow, { worktreesDir: 'relative/dir' }),
+    /worktreesDir must be an absolute path/,
+  );
   assert.equal(worktreesRoot(), defaultWorktreesRoot(), 'a refused value cannot leave a half-applied base');
-  await assert.rejects(
-    mount({ worktreeDir: configuredBase }),
+  assert.throws(
+    () => mountRow(fakeCtx({ withWebServer: false }), worktreeRow, { worktreeDir: '/tmp/nope' }),
     /unknown plugin config key/,
     'a misspelled key must fail loudly: ignoring it would move worktrees silently',
   );
-  await assert.rejects(
-    mount({ worktreesDir: configuredBase, extra: true }),
+  assert.throws(
+    () => mountRow(fakeCtx({ withWebServer: false }), worktreeRow, { worktreesDir: '/tmp/bw-ok', extra: true }),
     /unknown plugin config key/,
   );
-  console.log('worktreesDir config ok');
 }
 
 // A hub whose housekeeping timers hold the event loop turns "the suite finished"
@@ -415,8 +335,9 @@ for (const withWebServer of [false, true]) {
   console.log(`housekeeping timers ok: ${handles.length} unref'd`);
 }
 
-// A duplicate route must dispose the API heartbeat immediately; the simulated
-// Cordis rollback then disposes effects registered before the failing one.
+// A duplicate route must dispose the API heartbeat and hub timers immediately;
+// the first row's failed mount also must not poison the root: its lease was
+// never recorded, so a retry on the same ctx creates a fresh runtime.
 {
   const originalSetInterval = globalThis.setInterval;
   const originalClearInterval = globalThis.clearInterval;
@@ -430,22 +351,17 @@ for (const withWebServer of [false, true]) {
     intervals.delete(token);
   };
   try {
-    const { ctx, effects } = fakeCtx({ withWebServer: true, registerThrows: true });
-    plugin.apply(ctx);
-    const disposers = [];
-    let failure = null;
-    for (const entry of effects) {
-      try {
-        const disposer = entry.factory();
-        if (typeof disposer === 'function') disposers.push(disposer);
-      } catch (error) {
-        failure = error;
-        break;
-      }
-    }
-    assert.match(String(failure?.message || failure), /duplicate route/);
-    for (const disposer of disposers.reverse()) await disposer();
+    const fake = fakeCtx({ withWebServer: true, registerThrows: true });
+    const diffRow = ROWS.find((row) => row.id === 'bw-diff');
+    assert.throws(() => diffRow.module.apply(fake.ctx), /duplicate route/);
     assert.equal(intervals.size, 0, 'failed registration cannot leak hub/API intervals');
+
+    fake.server.registerThrows = false;
+    const disposers = mountRow(fake, diffRow);
+    assert.equal(fake.routes.length, 1, 'the failed mount must not poison the root context');
+    await disposeEffects(disposers);
+    assert.equal(fake.unregistered.length, 1);
+    assert.equal(intervals.size, 0, 'the retried mount cleans up its intervals on disposal');
   } finally {
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;

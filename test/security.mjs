@@ -27,11 +27,11 @@ const scratchRoot = realpathSync.native(process.env.DSH_BW_TEST_TMP?.trim() || t
 const sandbox = mkdtempSync(join(scratchRoot, 'dsh-bw-security-'));
 process.env.DSH_HOME = join(sandbox, 'dsh-home');
 
-const { API_PREFIX, createApi, firstForwarded, isLoopbackPeer, sameOrigin } = await import('../lib/api.js');
-const { createWorkspaceAuthorizer } = await import('../lib/authorize.js');
-const { archiveWorktree, createWorktree, metadataPathFor, repoWorktreesRoot, validateManagedWorktree } = await import('../lib/worktree.js');
-const { createGitStateHub } = await import('../lib/state.js');
-const { hostMutationCoordinator } = await import('../lib/mutation.js');
+const { API_PREFIX, createApi, firstForwarded, isLoopbackPeer, sameOrigin } = await import('../packages/core/lib/api.js');
+const { createWorkspaceAuthorizer } = await import('../packages/core/lib/authorize.js');
+const { archiveWorktree, createWorktree, metadataPathFor, repoWorktreesRoot, validateManagedWorktree } = await import('../packages/core/lib/worktree.js');
+const { createGitStateHub } = await import('../packages/core/lib/state.js');
+const { hostMutationCoordinator } = await import('../packages/core/lib/mutation.js');
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -714,7 +714,7 @@ try {
 // authorized root: the rename replace swaps the directory entry, and the CAS
 // re-check immediately before it keeps concurrent writers detectable.
 {
-  const stable = await import('../lib/stable.js');
+  const stable = await import('../packages/core/lib/stable.js');
   const aliasRepo = join(sandbox, 'alias-path-mode');
   initRepo(aliasRepo);
   roots = [...roots, aliasRepo];

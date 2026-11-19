@@ -1,107 +1,88 @@
 # dsh-better-workspaces
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Français](README.fr.md) · [한국어](README.ko.md)
+DeepSeek Harness Web GUI 的 Git 增强：工作树、差异审阅、Pull Request 与 issue 引用。
+0.4.0 起它由**四个可独立开关的插件**组成，共享同一套内核。
 
-在 DeepSeek Harness Web GUI 中原生集成 Git Worktree、文件差异对比、GitHub PR 与 Issue 联动。每个任务独享独立分支与隔离目录，从首条提示词到提交推送，全流程无需离开当前页面或切换终端。
+`@ds-hu/dsh-better-workspaces` 是组合包（bundle）：它自带的 `cordis.patch.yml`
+插入四条 Loader row，因此 dsh 插件面板里会看到四个独立开关：
 
-**插件目录中的名称：** 工作区增强 · Better Workspaces。
+| Row | 模块 | 提供什么 |
+| --- | --- | --- |
+| `bw-diff` | **代码变更** | 官方右侧栏的 diff 页：未提交/已提交/任务三种差异、提交列表、提交 → 拉取 → 推送 → PR → 合并 → 归档的动作阶梯，以及带 CAS 保护的文件编辑器。 |
+| `bw-worktree` | **新建 worktree** | ① 输入框上方的暂存条（模式菜单、分支名骰子、择基/PR 选择、创建）与 ② 同名的右侧栏页面。两者在同一行里各有一个开关（在该行的配置卡片里）。 |
+| `bw-status` | **工作区 Git 状态** | 左侧每个工作区标题下的分支/PR/CI/`+N/−N`/`↑a↓b` 徽章行、托管工作树图标，以及输入框上方的 diff 胶囊。 |
+| `bw-forge` | **Issue 与 PR** | ① 输入框里的 GitHub 圆标（issue/PR 选择器，挂上引用 chip）与 ② 同名的右侧栏页面。两者在同一行里各有一个开关。 |
 
----
-
-## 功能特性
-
-### 1. 输入框就地选择工作模式
-
-输入框上方提供 `Local` 与 `New worktree` 快速切换。日常小修改直接在 `Local` 当前目录进行；独立功能或多任务并行时切换为 `New worktree`，自动创建专属目录与分支，彻底避免不同会话相互干扰。
-
-![输入框上方的 Local 与 New worktree 切换](docs/screenshots/01-worktree-mode.png)
-
-### 2. 快速创建隔离工作区
-
-输入分支名或点骰子随机生成，基线支持本地分支、远端分支或已有的 Pull Request。点击 **Create** 即可自动就绪独立的 worktree 工作区并开启关联会话。
-
-![包含分支名、基线与创建按钮的 worktree 表单](docs/screenshots/02-worktree-form.png)
-
-### 3. 工作区列表直观掌握 Git 状态
-
-侧边栏每个工作区标题下方实时呈现该工作副本的分支与改动行数（`+11 −3`）——一个工作区只显示一次，工作区内的会话不再逐行重复。已关联的 PR 和 CI 检查状态同步展示在同一行，无需在终端频繁输入 `git status`。上次看到的状态会被记住，重新打开界面时先立刻显示、随后自动校正。
-
-![各工作区行显示自己的分支与改动量](docs/screenshots/03-sidebar-badges.png)
-
-### 4. 侧边栏全功能差异评审（Diff）
-
-点击右上角 `±` 胶囊按钮展开差异面板。支持在未提交修改、当前会话改动、任务全量改动与对比基线之间无缝切换；可逐行审阅 hunk 差异、就地编辑源码，并随时查看提交历史。
-
-![差异页包含范围切换、文件列表、逐行差异和操作按钮](docs/screenshots/04-diff-view.png)
-
-### 5. 页面内直达提交与分支操作
-
-在差异面板中直接完成 Commit、Pull、Push、创建 PR、合并、从基线同步更新或丢弃更改。对于暂不可用的操作，面板会明确说明缺少的前置条件，避免误操作。
-
-![Commit 按钮与包含 Pull、Push、PR、合并、更新、丢弃的 More 菜单](docs/screenshots/05-diff-actions.png)
-
-### 6. 一键将 GitHub PR / Issue 引入提示词
-
-点击输入框旁的 GitHub 按钮，直接浏览并筛选当前仓库的开放 PR 和 Issue，点选后即可将其作为结构化引用加入输入框。
-
-![列出开放 Pull Request 和 Issue 的 GitHub 选择器](docs/screenshots/06-github-picker.png)
-
-### 7. 紧凑的引用标签与完整上下文展开
-
-输入框内仅展示轻巧的引用标签，不挤占编辑视线；点击发送时，标签自动展开为完整的标题、正文、分支信息及 URL，确保大模型获得精确且完整的上下文。
-
-![输入框中只显示一个紧凑的 Issue 引用标签和发送按钮](docs/screenshots/07-reference-chip.png)
-
----
-
-## 快速上手
-
-1. **新建会话：** 在 DeepSeek Harness 中打开任一 Git 工作区并开启会话。
-2. **选择模式：** 在输入框上方根据任务需要选择 `Local` 或 `New worktree`。
-3. **开发与评审：** 通过 GitHub 按钮引用 Issue，通过侧边栏徽章跟踪进度，点击 `±` 细致评审代码改动。
-4. **一键交付：** 在差异面板内直接完成提交、推送或创建 Pull Request。
-
----
+关掉其中任意一行，其余三行完全不受影响：每条 row 都是独立的 Cordis 条目，有各自的
+宿主路由、各自的浏览器 bundle、各自的开关。共享库 `@ds-hu/dsh-bw-core` **不是**可开关
+模块（既不声明 `dsh.bundle` 也不声明 `dsh.client`），不会被误关。
 
 ## 安装
 
-通过 npm 一行命令安装：
+要求：`dsh` ≥ 0.2.0、`web` profile、Node.js ≥ 20.19、`PATH` 上有 `pnpm`、`git` ≥ 2.31；
+支持 Linux / Windows 10+（Git for Windows）/ macOS 13+。`gh` 可选（已登录时才有 PR/CI
+徽章、选择器与 PR 检出，缺失时其余功能照常）。
 
 ```bash
 dsh plugin --profile web add @ds-hu/dsh-better-workspaces
 ```
 
-安装后重启一次 `dsh --profile web` 即可生效。
+重启一次 `dsh --profile web` 即可，没有第二步：组合包声明了 `dsh.bundle`，它的 patch
+就是四个模块的挂载来源。**不要**手工往 profile 的 `cordis.patch.yml` 里再写一遍行。
 
-也可以直接在 DSH Web 界面中安装：
+### 从 0.3.x（单行）升级
 
-1. 打开侧栏的 **插件** 页面。
-2. 点击 **添加插件**。
-3. 输入 `@ds-hu/dsh-better-workspaces`，安装源选择 **npm 官方源**。
-4. 点击 **安装**；安装完成后点击 **立即启用**。如界面提示需要重启，请重启一次 `dsh --profile web`。
+0.3.x 只有一条 `better-workspaces` row；0.4.x 换成 `bw-diff`、`bw-worktree`、`bw-status`、
+`bw-forge`。老 profile 里请：删掉 `- id: better-workspaces` 的覆盖项（未知 id 只是警告，
+但已无意义）；按模块重新选择开关；`worktreesDir` 写在任意一个功能行上（建议 `bw-worktree`）。
+浏览器存储键、草稿交接协议与所有 HTTP 响应形状都没变。
 
-### 环境要求
-- **DeepSeek Harness:** ≥ 0.2.0
-- **Node.js:** ≥ 20.19
-- **依赖工具:** `git`、`pnpm`（均需在 `PATH` 中可用）
-- **GitHub CLI（可选）:** 若配置了已登录的 `gh`，可使用 PR 与 Issue 快速检索和引用功能；未安装时，Worktree、侧边栏徽章和差异评审等全部核心功能均可正常使用。
+## 原生模块开关
 
----
+* **整个模块**：插件面板里那一行的开关。关闭后宿主半边不会挂载，浏览器 bundle 也会从
+  `__DSH_BOOT__` 里消失。
+* **模块 II / IV 的两个界面**：该行自己的配置卡片（同一个 bundle 内注册，拨动开关即时
+  重新注册，无需刷新）。
+* **路由组**：关闭的模块，其路由返回 `404 {"ok":false,"error":"feature module disabled"}`。
+  只读数据面（`/snapshots`、`/events`、`/detect`、`/pulls`、`/pull`）由共享内核持有，
+  只要还有任意一个模块在就可用——这就是每个模块单独开启也能完整工作的原因。
 
-## 说明
+契约见 [docs/ARCHITECTURE-modules.md](docs/ARCHITECTURE-modules.md)，术语表见
+[CONTEXT.md](CONTEXT.md)，设计记录见 [docs/adr/](docs/adr/)。
 
-- 兼容 Linux、macOS 13+ 及 Windows 10+。
-- 所有流程均在当前浏览器标签页内完成，无需额外开启客户端或切换应用。
+## 配置
 
----
+唯一的宿主配置键是 `worktreesDir`（托管工作树命名空间的父目录，默认
+`<DSH_HOME>/worktrees`），写在某一个功能行上（建议 `bw-worktree`）：
 
-## 文档
+```yaml
+- id: bw-worktree
+  config:
+    worktreesDir: /absolute/path/to/worktrees
+```
 
-- [docs/TECHNICAL.md](docs/TECHNICAL.md) — 架构解析、安全边界、升级说明与手动维护操作。
-- [docs/adr/](docs/adr/) — 详细架构决策记录（ADR）。
+已有工作树时改动基目录：那些检出仍可 diff/提交/推送，但不再属于托管命名空间（不可归档、
+不被废弃清扫），宿主会在启动日志里点名被落下的目录。
 
----
+## 开发
 
-## 许可证
+仓库是 npm workspaces 单仓多包：
 
-[MIT](LICENSE)。第三方组件声明见 [NOTICE](NOTICE) 与 [LICENSES/](LICENSES/)。
+```
+packages/core       @ds-hu/dsh-bw-core    共享宿主引擎 + 共享浏览器源码（不是 row）
+packages/diff       @ds-hu/dsh-bw-diff    row bw-diff
+packages/worktree   @ds-hu/dsh-bw-worktree row bw-worktree
+packages/status     @ds-hu/dsh-bw-status  row bw-status
+packages/forge      @ds-hu/dsh-bw-forge   row bw-forge
+```
+
+浏览器 bundle 是 **CI 产物**：`npm run build:client`（esbuild）生成
+`packages/<feature>/lib/client.js`，该文件被 git 忽略、由 CI 在测试与发布前构建。
+仓库里永不提交构建产物，所以 checkout 不会出现「源码与产物不一致」。
+质量门禁与发布都在 GitHub Actions 里跑（`.github/workflows/ci.yml`、
+`.github/workflows/release.yml`），`npm run check` 是同一条门禁。
+
+## 许可
+
+MIT。工作树与编辑器设计部分参考 [paseo](https://github.com/paseo-ai/paseo)
+（Apache-2.0）与 harness 的 `dsh-git-worktree`（MIT），见 `NOTICE` 与 `LICENSES/`。

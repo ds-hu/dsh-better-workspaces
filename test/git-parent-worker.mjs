@@ -1,4 +1,4 @@
-import { runGit } from '../lib/git.js';
+import { runGit } from '../packages/core/lib/git.js';
 
 const [cwd, bin] = process.argv.slice(2);
 const result = await runGit(['status', '--porcelain'], {

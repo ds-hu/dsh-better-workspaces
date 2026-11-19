@@ -25,6 +25,10 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      # Client bundles are CI artifacts: the browser suites load the built
+      # `packages/<feature>/lib/client.js`, and nothing in the repository ships
+      # them (docs/ARCHITECTURE-modules.md §8).
+      - run: npm run build:client
       - run: npm run check
 
   # The Ubuntu job above is the full gate. This one exists because the other

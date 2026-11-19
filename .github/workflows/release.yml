@@ -1,0 +1,60 @@
+name: Release
+
+# Publishing is a CI job, never a laptop step: a tag push runs the full quality
+# gate on the exact tree that is about to be published, then publishes the six
+# packages in dependency order and creates the GitHub release.
+#
+# Required repository secret: NPM_TOKEN (an npm automation token for the
+# @ds-hu scope). The tag name is the release name; every package shares the
+# version in the tag.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to npm and GitHub
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - run: npm run build:client
+      - run: npm run check
+
+      # Dependency order matters: the bundle pins the feature packages, and
+      # every feature package pins core. npm refuses a version that already
+      # exists, so a re-run of the same tag fails loudly instead of silently
+      # republishing. Each package is published from its own directory (the
+      # directory-packaging path is the least ambiguous one under workspaces).
+      - name: Publish core and feature packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for pkg in core diff worktree status forge; do
+            echo "::group::publish @ds-hu/dsh-bw-$pkg@$GITHUB_REF_NAME"
+            (cd "packages/$pkg" && npm publish --access public --provenance)
+            echo "::endgroup::"
+          done
+
+      - name: Publish the bundle package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME" --verify-tag

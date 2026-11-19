@@ -17,38 +17,52 @@ const React = ReactModule.default;
 const { act } = ReactModule;
 const { createRoot } = await import('react-dom/client');
 
-let loadedEntry = null;
-window.__ModuleLoader__ = { load(entry) { loadedEntry = entry; } };
-const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
-window.eval(source);
-assert.ok(loadedEntry, 'the browser bundle registers with ModuleLoader');
-const mod = loadedEntry.factory((specifier) => {
+/* Four self-contained bundles, one per feature row (ADR "modular 0.4.0"):
+   each bundles its own core copy and registers with the loader under its own
+   package name. The suite applies all four, exactly as the host does. */
+const FEATURES = ['diff', 'worktree', 'status', 'forge'];
+const factory = (specifier) => {
   if (specifier === 'react') return React;
   if (specifier === 'react-dom/client') return { createRoot };
   throw new Error(`unexpected client dependency: ${specifier}`);
-});
+};
+const bundles = {};
+const sources = [];
+for (const feature of FEATURES) {
+  let entry = null;
+  window.__ModuleLoader__ = { load(value) { entry = value; } };
+  const bundleSource = readFileSync(new URL(`../packages/${feature}/lib/client.js`, import.meta.url), 'utf8');
+  sources.push(bundleSource);
+  window.eval(bundleSource);
+  assert.ok(entry, `${feature}: bundle registers with ModuleLoader`);
+  const manifest = JSON.parse(readFileSync(new URL(`../packages/${feature}/package.json`, import.meta.url), 'utf8'));
+  assert.equal(entry.id, manifest.name, `${feature}: loader id is the package name`);
+  bundles[feature] = { source: bundleSource, mod: entry.factory(factory) };
+}
+const T = Object.assign({}, ...FEATURES.map((feature) => bundles[feature].mod.__bwTest));
+const applyAll = (target) => { for (const feature of FEATURES) bundles[feature].mod.apply(target); };
 
-const secondMod = loadedEntry.factory((specifier) => {
-  if (specifier === 'react') return React;
-  if (specifier === 'react-dom/client') return { createRoot };
-  throw new Error(`unexpected client dependency: ${specifier}`);
-});
-
-// Two independently materialized client packages model an HMR overlap. Both
+// A second, independently materialized diff package models an HMR overlap. Both
 // must share one adopted style tag, and releasing the older package must not
-// remove CSS still owned by the newer one.
+// remove CSS still owned by the newer one. The diff bundle owns
+// `@ds-hu/dsh-bw-diff/client.css`; the pre-existing tag is adopted, not added.
+let secondLoadedEntry = null;
+window.__ModuleLoader__ = { load(value) { secondLoadedEntry = value; } };
+window.eval(bundles.diff.source);
+const secondDiffMod = secondLoadedEntry.factory(factory);
+const diffCssId = '@ds-hu/dsh-bw-diff/client.css';
 const legacyStyle = document.createElement('style');
-legacyStyle.dataset.pluginCss = 'dsh-better-workspaces/client.css';
+legacyStyle.dataset.pluginCss = diffCssId;
 legacyStyle.textContent = 'legacy';
 document.head.appendChild(legacyStyle);
-const releaseFirstCss = mod.__bwTest.mountCss();
-const releaseSecondCss = secondMod.__bwTest.mountCss();
-let styles = document.querySelectorAll('style[data-plugin-css="dsh-better-workspaces/client.css"]');
+const releaseFirstCss = bundles.diff.mod.__bwTest.mountCss();
+const releaseSecondCss = secondDiffMod.__bwTest.mountCss();
+let styles = document.querySelectorAll(`style[data-plugin-css="${diffCssId}"]`);
 assert.equal(styles.length, 1, 'overlapping packages adopt one shared style element');
 assert.notEqual(styles[0].textContent, 'legacy', 'the adopted style receives current CSS');
 releaseFirstCss();
 releaseFirstCss();
-styles = document.querySelectorAll('style[data-plugin-css="dsh-better-workspaces/client.css"]');
+styles = document.querySelectorAll(`style[data-plugin-css="${diffCssId}"]`);
 assert.equal(styles.length, 1, 'releasing an older package retains CSS for the live package');
 
 // Keyed Hero resources must abort and ignore the old cwd when the session store
@@ -79,7 +93,7 @@ let sessionSnapshot = {
 };
 const sessionListeners = new Set();
 const mainUiSession = stubUiSession('a');
-const restoreRuntime = mod.__bwTest.setTestRuntime({
+const restoreRuntime = T.setTestRuntime({
   get: (name) => (name === 'uiSession' ? mainUiSession : undefined),
   sessions: {
     list: {
@@ -106,7 +120,7 @@ globalThis.fetch = window.fetch;
 const heroContainer = document.createElement('div');
 document.body.appendChild(heroContainer);
 const heroRoot = createRoot(heroContainer);
-await act(async () => { heroRoot.render(React.createElement(mod.__bwTest.HeroControl)); });
+await act(async () => { heroRoot.render(React.createElement(T.HeroControl)); });
 assert.equal(typeof resolveDetectA, 'function', 'session A starts detection');
 sessionSnapshot = {
   byId: { b: { cwd: '/repo-b', title: 'B' } }, ids: ['b'], phase: 'ready',
@@ -139,7 +153,7 @@ restoreRuntime();
  * Reading the path off the owning Workspace is what the official picker does;
  * with no fallback the control rendered nothing at all.
  * ------------------------------------------------------------------ */
-const { heroCwdFor, heroControlKey } = mod.__bwTest;
+const { heroCwdFor, heroControlKey } = T;
 {
   const items = [{ workspaceId: 'w1', path: '/repo-w1', title: 'W1', sessionIds: ['s1', 's2'] }];
   assert.equal(heroCwdFor({ cwd: '/repo-bound' }, 's1', items), '/repo-bound',
@@ -162,7 +176,7 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
 
   // The projection is the effective directory; header cwd is the original
   // project and must stay observable in diagnostics beside it.
-  const { effectiveSessionCwd } = mod.__bwTest;
+  const { effectiveSessionCwd } = T;
   assert.equal(effectiveSessionCwd({ cwd: '/original', projectionValues: { workingDirectory: '/entered' } }), '/entered');
   assert.equal(effectiveSessionCwd({ cwd: '/original', projectionValues: {} }), '/original');
   assert.equal(effectiveSessionCwd({ projectionValues: { workingDirectory: '/entered' } }), '/entered');
@@ -185,7 +199,7 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
 
   // The source is what makes a report legible: "hidden although the session
   // carries this cwd" and "hidden because nothing resolved" are different bugs.
-  const { heroResolve } = mod.__bwTest;
+  const { heroResolve } = T;
   const resolveCases = [
     [{ cwd: '/repo-bound' }, 's1', { cwd: '/repo-bound', source: 'session' }, 'a session cwd reports itself as the source'],
     [{}, 's1', { cwd: '/repo-w1', source: 'workspace' }, 'a workspace-derived cwd reports the workspace as the source'],
@@ -200,7 +214,7 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
   }
 
   // projection must be total and must not leak the stores' own objects
-  const { projectSessionSnapshot, projectWorkspaceSnapshot } = mod.__bwTest;
+  const { projectSessionSnapshot, projectWorkspaceSnapshot } = T;
   assert.equal(projectSessionSnapshot(null), null, 'a missing session snapshot projects to null');
   assert.equal(projectSessionSnapshot(undefined), null, 'an undefined session snapshot projects to null');
   const projected = projectSessionSnapshot({ current: 's1', ids: ['s1'], phase: 'ready', byId: { s1: { title: 'T' } } });
@@ -244,21 +258,21 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
   {
     const emptyList = { byId: {}, ids: [], phase: 'ready' };
     const probeSession = stubUiSession('probe-1');
-    const restoreProbe = mod.__bwTest.setTestRuntime({
+    const restoreProbe = T.setTestRuntime({
       get: (name) => (name === 'uiSession' ? probeSession : undefined),
       sessions: { list: { getSnapshot: () => emptyList, subscribe: () => () => {} } },
     });
-    assert.equal(mod.__bwTest.currentSessionId(), 'probe-1', 'the on-screen id comes from uiSession, not the list');
+    assert.equal(T.currentSessionId(), 'probe-1', 'the on-screen id comes from uiSession, not the list');
     probeSession.setKey('probe-2');
-    assert.equal(mod.__bwTest.currentSessionId(), 'probe-2', 'and it follows a navigation');
+    assert.equal(T.currentSessionId(), 'probe-2', 'and it follows a navigation');
     // A keyless binding answers undefined, and the list's (non-existent)
     // `current` field must not be consulted to fill the gap.
     const keyless = stubUiSession(undefined);
-    mod.__bwTest.setTestRuntime({
+    T.setTestRuntime({
       get: (name) => (name === 'uiSession' ? keyless : undefined),
       sessions: { list: { getSnapshot: () => ({ ...emptyList, current: 'stale-id' }), subscribe: () => () => {} } },
     });
-    assert.equal(mod.__bwTest.currentSessionId(), undefined,
+    assert.equal(T.currentSessionId(), undefined,
       'a keyless binding resolves to nothing rather than the legacy list field');
     restoreProbe();
   }
@@ -294,7 +308,7 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
   const createSessions = { byId: { [createSessionId]: { cwd: '/repo-create', title: 'C' } }, ids: [createSessionId], phase: 'ready' };
   // Third argument echoes interpolation params: with the default key-returning
   // stub a `hero.failed` message renders as the bare key and hides its cause.
-  const restoreCreate = mod.__bwTest.setTestRuntime({
+  const restoreCreate = T.setTestRuntime({
     get: (name) => (name === 'uiSession' ? createUiSession : undefined),
     sessions: { list: { getSnapshot: () => createSessions, subscribe: () => () => {} }, scope: () => createScope },
     workspaces: { list: createStore },
@@ -322,7 +336,7 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
   const createContainer = document.createElement('div');
   document.body.appendChild(createContainer);
   const createRoot2 = createRoot(createContainer);
-  await act(async () => { createRoot2.render(React.createElement(mod.__bwTest.HeroControl)); });
+  await act(async () => { createRoot2.render(React.createElement(T.HeroControl)); });
   await act(async () => { await Promise.resolve(); await Promise.resolve(); });
   await act(async () => { createContainer.querySelector('.dsh-bw-hero-btn').click(); });
   // the popover is state: it needs its own commit before its items exist
@@ -405,7 +419,7 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
       getSnapshot() { return this.snapshot; },
     };
     const uiSession = stubUiSession(sessionId);
-    const restore = mod.__bwTest.setTestRuntime({
+    const restore = T.setTestRuntime({
       get: (name) => {
         if (name === 'uiSession') return uiSession;
         if (name === 'uiWorkspace') return { openSession: (id) => calls.reveals.push(id) };
@@ -468,7 +482,7 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    await act(async () => { root.render(React.createElement(mod.__bwTest.HeroControl)); });
+    await act(async () => { root.render(React.createElement(T.HeroControl)); });
     await settle();
     await act(async () => { container.querySelector('.dsh-bw-hero-btn').click(); });
     await settle();
@@ -631,7 +645,7 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
     workspaceSnapshot = { items, phase: 'ready' };
     for (const listener of workspaceListeners) listener();
   };
-  const restoreBlank = mod.__bwTest.setTestRuntime({
+  const restoreBlank = T.setTestRuntime({
     get: (name) => (name === 'uiSession' ? blankUiSession : undefined),
     sessions: { list: { getSnapshot: () => blankSnapshot, subscribe: () => () => {} } },
     workspaces: {
@@ -656,7 +670,7 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
   const root = createRoot(container);
 
   // no membership yet → nothing, and no guess
-  await act(async () => { root.render(React.createElement(mod.__bwTest.HeroControl)); });
+  await act(async () => { root.render(React.createElement(T.HeroControl)); });
   assert.equal(container.querySelector('.dsh-bw-hero-label'), null,
     'no Workspace membership and no cwd keeps the control hidden');
 
@@ -725,7 +739,7 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
     },
   ];
   for (const { label, uiSession, snapshot, expect: expected } of cases) {
-    const restore = mod.__bwTest.setTestRuntime({
+    const restore = T.setTestRuntime({
       get: (name) => (name === 'uiSession' ? uiSession : undefined),
       sessions: { list: { getSnapshot: () => snapshot, subscribe: () => () => {} } },
       workspaces: {
@@ -745,10 +759,10 @@ const { heroCwdFor, heroControlKey } = mod.__bwTest;
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    await act(async () => { root.render(React.createElement(mod.__bwTest.HeroControl)); });
+    await act(async () => { root.render(React.createElement(T.HeroControl)); });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
-    const source = mod.__bwTest.heroDebugState;
+    const source = T.heroDebugState;
     // the observable it settled on is the assertion: a visible control for the
     // wrong Session would be worse than none
     if (expected === undefined) {
@@ -790,7 +804,7 @@ window.fetch = async (_url, options = {}) => {
   };
 };
 globalThis.fetch = window.fetch;
-const attached = mod.__bwTest.encodeForgeRef({
+const attached = T.encodeForgeRef({
   host: 'github.com', owner: 'acme', repo: 'widget', kind: 'change_request', number: 7,
 });
 let closeCount = 0;
@@ -798,7 +812,7 @@ const container = document.createElement('div');
 document.body.appendChild(container);
 const root = createRoot(container);
 await act(async () => {
-  root.render(React.createElement(mod.__bwTest.ForgePicker, {
+  root.render(React.createElement(T.ForgePicker, {
     cwd: '/repo',
     attached: [attached],
     onClose: () => { closeCount += 1; },
@@ -931,7 +945,7 @@ const CACHED_BRANCH = 'cached/from-last-visit';
 /* The persistent snapshot cache (ADR 0018, amendment 1): the previous visit's
    answer must paint the line before this batch is answered, and the batch must
    then replace it. Seeding it here is exactly what a reload does. */
-const SNAPSHOT_CACHE_KEY = mod.__bwTest.SNAPSHOT_CACHE_KEY;
+const SNAPSHOT_CACHE_KEY = T.SNAPSHOT_CACHE_KEY;
 window.localStorage.setItem(SNAPSHOT_CACHE_KEY, JSON.stringify({
   version: 1,
   savedAt: Date.now() - 60000,
@@ -974,7 +988,7 @@ const renderRows = () => rowRoot.render(React.createElement(React.Fragment, null
   React.createElement(SessionRow),
 ));
 await act(async () => { renderRows(); });
-await act(async () => { mod.apply(mockCtx); });
+await act(async () => { applyAll(mockCtx); });
 
 /* The diagnostic surface must exist while the plugin is mounted: it is the
    only way to separate "never injected" from "injected but hidden" in a bug
@@ -1116,7 +1130,7 @@ assert.equal(linesOf(sessionRow).length, 0, 'the Session row still stays untouch
  * inside the live `apply` window.
  * ------------------------------------------------------------------ */
 {
-  const { isHeroRow, nearestLayoutAncestor } = mod.__bwTest;
+  const { isHeroRow, nearestLayoutAncestor } = T;
   const row = document.createElement('div');
   row.className = 'wSkVaW_heroWorkspaceRow';
   const chip = document.createElement('button');
@@ -1157,10 +1171,21 @@ assert.equal(linesOf(sessionRow).length, 0, 'the Session row still stays untouch
   assert.equal(document.querySelectorAll('.dsh-bw-hero').length, 0, 'removing the row drops the control');
 }
 
-const pluginStyle = document.querySelector('style[data-plugin-css="dsh-better-workspaces/client.css"]');
-assert.ok(pluginStyle, 'the plugin stylesheet is mounted');
-assert.equal(pluginStyle.dataset.plugin, '@ds-hu/dsh-better-workspaces',
-  'the stylesheet carries the scoped module id DSH uses to evict this bundle\'s styles');
+/* Every bundle mounts its own stylesheet under its own module id: DSH evicts
+   styles per loader row, so one shared legacy tag would leak across rows. */
+const CSS_IDS = {
+  diff: '@ds-hu/dsh-bw-diff/client.css',
+  worktree: '@ds-hu/dsh-bw-worktree/client.css',
+  status: '@ds-hu/dsh-bw-status/client.css',
+  forge: '@ds-hu/dsh-bw-forge/client.css',
+};
+const styleCount = (cssId) => document.querySelectorAll(`style[data-plugin-css="${cssId}"]`).length;
+for (const [feature, cssId] of Object.entries(CSS_IDS)) {
+  assert.equal(styleCount(cssId), 1, `${feature}: stylesheet is mounted`);
+}
+const pluginStyle = document.querySelector(`style[data-plugin-css="${CSS_IDS.status}"]`);
+assert.equal(pluginStyle.dataset.plugin, '@ds-hu/dsh-bw-status',
+  'each stylesheet carries the scoped module id DSH uses to evict that row\'s styles');
 const badgesRule = /\.dsh-bw-badges\s*\{([^{}]*)\}/.exec(pluginStyle.textContent);
 assert.ok(badgesRule, 'the badge line rule is present');
 assert.ok(!/(^|[;\s])order:/.test(badgesRule[1]),
@@ -1176,7 +1201,7 @@ assert.ok(emptyRule, 'an empty badge line is hidden');
 assert.ok(/display:\s*none/.test(emptyRule[1]),
   'the empty line contributes no gap or padding to a non-git Workspace row');
 
-const domEffect = appliedEffects.find((entry) => entry.label === 'better-workspaces: dom injection');
+const domEffect = appliedEffects.find((entry) => entry.label === 'bw-status: dom injection');
 assert.ok(domEffect, 'the DOM injection effect is registered');
 await act(async () => { domEffect.dispose(); });
 assert.equal(document.querySelectorAll('.dsh-bw-badges').length, 0,
@@ -1198,16 +1223,19 @@ for (const entry of [...appliedEffects].reverse()) {
 }
 assert.equal(window.__dshBwDebug, undefined,
   'disposing every effect removes the diagnostic global (no residue on window)');
-assert.equal(document.querySelectorAll('style[data-plugin-css="dsh-better-workspaces/client.css"]').length, 1,
-  'releasing the applied package keeps the surviving stylesheet reference');
+assert.equal(styleCount(CSS_IDS.diff), 1,
+  'releasing the applied package keeps the second diff materialization\'s shared stylesheet');
+assert.equal(styleCount(CSS_IDS.status), 0, 'the status bundle style is released with its effects');
+assert.equal(styleCount(CSS_IDS.worktree), 0, 'the worktree bundle style is released with its effects');
+assert.equal(styleCount(CSS_IDS.forge), 0, 'the forge bundle style is released with its effects');
 await act(async () => { rowRoot.unmount(); });
 rowHost.remove();
 window.fetch = previousFetch;
 globalThis.fetch = window.fetch;
 
 releaseSecondCss();
-assert.equal(document.querySelectorAll('style[data-plugin-css="dsh-better-workspaces/client.css"]').length, 0,
-  'the final package cleanup removes the shared style');
+assert.equal(styleCount(CSS_IDS.diff), 0,
+  'the final package cleanup removes the shared diff style');
 
 /* ------------------------------------------------------------------ *
  * persistent snapshot cache, off the live window (ADR 0018 amendment 1)
@@ -1221,7 +1249,7 @@ assert.equal(document.querySelectorAll('style[data-plugin-css="dsh-better-worksp
   const {
     readSnapshotCache, writeSnapshotCache, snapshotCacheSignature,
     SNAPSHOT_CACHE_MAX, SNAPSHOT_CACHE_MAX_AGE_MS, SNAPSHOT_CACHE_MAX_BYTES,
-  } = mod.__bwTest;
+  } = T;
   const storage = window.localStorage;
   storage.removeItem(SNAPSHOT_CACHE_KEY);
   // cross-realm: the bundle's objects come from the jsdom realm, so compare JSON
@@ -1289,7 +1317,7 @@ assert.equal(document.querySelectorAll('style[data-plugin-css="dsh-better-worksp
  * hero anchor helpers, off the live window (no app runtime needed —
  * these exercise the climb and the degrade path, not HeroControl).
  * ------------------------------------------------------------------ */
-const { createHeroInjector, nearestLayoutAncestor: climb, isHeroRow: heroRowish } = mod.__bwTest;
+const { createHeroInjector, nearestLayoutAncestor: climb, isHeroRow: heroRowish } = T;
 // a display:contents outlet is skipped; the layout row behind it is returned
 {
   const row = document.createElement('div');

@@ -1,24 +1,15 @@
 {
   "name": "@ds-hu/dsh-better-workspaces",
-  "description": "Worktrees, diffs, pull requests, and issue references inside the DeepSeek Harness Web GUI",
-  "version": "0.3.3",
+  "description": "Worktrees, diffs, pull requests, and issue references inside the DeepSeek Harness Web GUI — now delivered as four independently switchable feature plugins.",
+  "version": "0.4.0",
   "type": "module",
   "publishConfig": {
     "access": "public"
   },
-  "main": "lib/index.js",
   "icon": "./icon.svg",
-  "exports": {
-    ".": "./lib/index.js",
-    "./client": "./lib/client.js",
-    "./package.json": "./package.json",
-    "./locale/*.json": "./locale/*.json",
-    "./icon": "./icon.svg"
-  },
-  "engines": {
-    "node": ">=20.19.0",
-    "dsh": ">=0.2.0 <0.3.0"
-  },
+  "workspaces": [
+    "packages/*"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ds-hu/dsh-better-workspaces.git"
@@ -30,31 +21,30 @@
   "keywords": [
     "deepseek-harness",
     "dsh",
+    "dsh-plugin",
     "git",
     "worktree",
     "cordis"
   ],
+  "engines": {
+    "node": ">=20.19.0",
+    "dsh": ">=0.2.0 <0.3.0"
+  },
+  "dependencies": {
+    "@ds-hu/dsh-bw-core": "0.4.0",
+    "@ds-hu/dsh-bw-diff": "0.4.0",
+    "@ds-hu/dsh-bw-forge": "0.4.0",
+    "@ds-hu/dsh-bw-status": "0.4.0",
+    "@ds-hu/dsh-bw-worktree": "0.4.0"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "inject": [
-        "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-session",
-        "@deepseek-ai/dsh-client-ui-sidebar-right",
-        "@deepseek-ai/dsh-client-ui-workspace"
-      ],
-      "platform": "web"
     }
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2"
   },
   "license": "MIT",
   "files": [
     "cordis.patch.yml",
-    "lib",
     "locale/*.json",
     "icon.svg",
     "README.md",
@@ -67,18 +57,20 @@
   ],
   "scripts": {
     "lint": "eslint .",
+    "build:client": "node scripts/build-client.mjs",
     "test:host": "node test/run.js",
     "test:security": "node test/security.mjs",
     "test:mutation": "node test/mutation.mjs",
     "test:client": "node test/client-smoke.mjs && node test/client-react.mjs",
     "test:mount": "node test/mount-check.mjs",
-    "test": "npm run test:host && npm run test:security && npm run test:mutation && npm run test:client && npm run test:mount",
+    "test": "npm run test:host && npm run test:security && npm run test:mutation && npm run test:client && npm run test:surfaces && npm run test:mount",
     "test:pack": "node test/package.mjs",
-    "check": "npm run lint && npm test && npm run test:pack",
-    "prepublishOnly": "npm run check"
+    "check": "npm run lint && npm run test && npm run test:pack",
+    "test:surfaces": "node test/surfaces.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "esbuild": "0.25.9",
     "eslint": "10.10.0",
     "globals": "17.12.0",
     "jsdom": "24.1.3",

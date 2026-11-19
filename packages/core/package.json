@@ -1,0 +1,33 @@
+{
+  "name": "@ds-hu/dsh-bw-core",
+  "description": "Shared host engine and browser source for the dsh-better-workspaces feature plugins. A library, never a Loader row: it has no dsh.bundle and no dsh.client, so it cannot be switched in the plugin panel.",
+  "version": "0.4.0",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client/*": "./client/*",
+    "./*": "./lib/*",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=20.19.0",
+    "dsh": ">=0.2.0 <0.3.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ds-hu/dsh-better-workspaces.git",
+    "directory": "packages/core"
+  },
+  "license": "MIT",
+  "files": [
+    "lib",
+    "client",
+    "LICENSE",
+    "NOTICE",
+    "LICENSES"
+  ]
+}

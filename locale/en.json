@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Better Workspaces",
-    "description": "Adds Git worktrees, diff review, commit/push/PR actions, and issue references to Workspaces, with branch and change badges in the sidebar."
+    "description": "Four independently switchable dsh plugin rows: the code-changes page, new-worktree (composer strip + right-sidebar page), workspace Git badges and the composer diff pill, and Issues & PRs (composer control + right-sidebar page)."
   }
 }

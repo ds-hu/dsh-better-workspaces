@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Workspace Git Status",
+    "description": "The branch/PR/CI/diffstat/ahead-behind badge line under each Workspace title, plus the composer diff pill."
+  }
+}

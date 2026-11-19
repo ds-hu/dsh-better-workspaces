@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createMutationCoordinator } from '../lib/mutation.js';
+import { createMutationCoordinator } from '../packages/core/lib/mutation.js';
 
 function deferred() {
   let resolve;

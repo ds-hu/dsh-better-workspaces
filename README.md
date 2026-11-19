@@ -1,107 +1,113 @@
 # dsh-better-workspaces
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Français](README.fr.md) · [한국어](README.ko.md)
+Worktrees, diffs, pull requests and issue references for the DeepSeek Harness
+Web GUI — delivered as **four independently switchable plugins** that share one
+small engine.
 
-Git worktrees, full diff inspection, pull requests, and issue references inside the DeepSeek Harness Web GUI. Give each task its own isolated branch and directory—navigate, review, and ship without switching tabs or opening a terminal.
+`@ds-hu/dsh-better-workspaces` is a bundle package. Its own `cordis.patch.yml`
+inserts four Loader rows, so the dsh Plugins page shows four separate switches:
 
-**Plugin inventory name:** Better Workspaces · 工作区增强.
+| Row | Module | What you get |
+| --- | --- | --- |
+| `bw-diff` | **代码变更** | The right-sidebar diff page: uncommitted/committed/task diffs, commit list, the commit → pull → push → PR → merge → archive action ladder, and the CAS-protected file editor. |
+| `bw-worktree` | **新建 worktree** | ① the staging strip above the composer (worktree mode, branch-name dice, base-branch/PR selector, Create) and ② a matching right-sidebar **新建 worktree** page. Both live on one row and each has its own switch on the row's configuration card. |
+| `bw-status` | **工作区 Git 状态** | The branch/PR/CI/`+N/−N`/`↑a↓b` badge line under every Workspace title, the managed-worktree icon, and the composer diff pill. |
+| `bw-forge` | **Issue 与 PR** | ① the GitHub control inside the composer (opens the issue/PR picker, inserts a reference chip) and ② a matching right-sidebar **Issue 与 PR** page. Both live on one row with a switch each. |
 
----
+Switching one row off leaves the other three fully mounted: each row is a
+separate Cordis entry with its own host routes, its own browser bundle and its
+own switch. The shared library `@ds-hu/dsh-bw-core` is **not** a switchable
+module (it declares neither `dsh.bundle` nor `dsh.client`), so no feature can be
+disabled by accident.
 
-## Features
+## Install
 
-### 1. Workspace mode right in the composer
-
-Toggle between `Local` and `New worktree` directly above the prompt box. Keep simple edits in `Local`; switch to `New worktree` whenever a task needs its own branch and isolated directory, preventing parallel tasks from colliding.
-
-![Worktree mode in the composer](docs/screenshots/01-worktree-mode.png)
-
-### 2. Fast branch setup from branches or PRs
-
-Enter a branch name or click the dice to generate one. Base your worktree on any local branch, remote branch, or open pull request. Clicking **Create** spins up an isolated workspace with a ready session immediately.
-
-![Worktree form with branch name, base picker, and Create button](docs/screenshots/02-worktree-form.png)
-
-### 3. Workspace status and diff size at a glance
-
-Each workspace row in the sidebar shows the active branch and diff volume (`+11 −3`) of the checkout it owns—once per workspace, so sessions inside it no longer repeat the same line. When a pull request is open or CI checks are running, their status joins the same line—no need to run `git status` in the terminal. The last known state is kept across page loads, so reopening the GUI shows the line immediately and corrects it a moment later.
-
-![Workspace rows showing branch and diff size](docs/screenshots/03-sidebar-badges.png)
-
-### 4. Full-page diff review in the sidebar
-
-Click the `±` badge to open the diff drawer. Switch smoothly across uncommitted changes, current session changes, task scope, or base branch comparisons. Expand hunks line-by-line, edit files in place, and inspect recent commits.
-
-![Diff page with scopes, file list, hunks, and actions](docs/screenshots/04-diff-view.png)
-
-### 5. Git actions without leaving the page
-
-Run essential git actions straight from the diff view: Commit, Pull, Push, open a PR, merge, update from base, or discard changes. Inapplicable actions clearly explain prerequisite states.
-
-![Commit button and More menu with pull, push, PR, merge, update, and discard](docs/screenshots/05-diff-actions.png)
-
-### 6. Attach GitHub PRs and issues to prompts
-
-The GitHub button beside the composer lists open pull requests and issues from your repository. Select any item to attach it directly to your prompt.
-
-![GitHub picker listing open pull requests and issues](docs/screenshots/06-github-picker.png)
-
-### 7. Compact composer chips, complete model context
-
-Prompts stay clean with a compact reference chip in the input box. On send, it automatically expands into the full title, issue/PR body, branch details, and URL so the agent receives exact context.
-
-![Composer with a compact issue reference chip and send button](docs/screenshots/07-reference-chip.png)
-
----
-
-## Quick Workflow
-
-1. **Start a session:** Open any git workspace in DeepSeek Harness.
-2. **Choose your scope:** Select `Local` for quick in-place edits or `New worktree` for an isolated branch.
-3. **Develop & review:** Use the GitHub picker to reference issues, check progress via sidebar badges, and click `±` to review line-by-line diffs.
-4. **Ship:** Commit, push, or open a pull request directly from the diff view.
-
----
-
-## Installation
-
-Install from npm with one command:
+Requirements: `dsh` ≥ 0.2.0 with the `web` profile, Node.js ≥ 20.19, `pnpm` on
+`PATH`, `git` ≥ 2.31. Linux, Windows 10+/Server 2016+ (Git for Windows) and
+macOS 13+ are supported. `gh` (authenticated) is optional: it enables PR/checks
+badges, the picker and PR checkout; everything else degrades gracefully.
 
 ```bash
 dsh plugin --profile web add @ds-hu/dsh-better-workspaces
 ```
 
-Restart `dsh --profile web` once to activate.
+Restart `dsh --profile web` once. No second step: the package declares
+`dsh.bundle` and its patch is what mounts the four rows. Do **not** hand-edit
+the profile's `cordis.patch.yml` — the bundle already ships every row.
 
-Or install from the DSH Web GUI:
+### Upgrading from 0.3.x (one row)
 
-1. Open **Plugins** in the sidebar.
-2. Click **Add plugin**.
-3. Enter `@ds-hu/dsh-better-workspaces` and choose **Official npm registry** as the source.
-4. Click **Install**, then **Enable now** when the installation finishes. If a restart is requested, restart `dsh --profile web`.
+0.3.x shipped a single row called `better-workspaces`. 0.4.x replaces it with
+`bw-diff`, `bw-worktree`, `bw-status` and `bw-forge`. Two things to do in a
+profile that pinned the old row:
 
-### Requirements
-- **DeepSeek Harness:** ≥ 0.2.0
-- **Node.js:** ≥ 20.19
-- **Tools:** `git`, `pnpm` (available on `PATH`)
-- **GitHub CLI (optional):** Authenticated `gh` enables PR and issue picker features. Worktrees, sidebar badges, and diff review work fully without it.
+1. Delete any `- id: better-workspaces` override from the profile's
+   `cordis.patch.yml` (an unknown id is only a warning, but it is dead weight).
+2. Re-apply per-row choices: each module now has its own switch, and
+   `worktreesDir` is read from any feature row (recommended: `bw-worktree`).
 
----
+Browser storage keys, the draft hand-off protocol and every HTTP response shape
+are unchanged.
 
-## Notes
+## Native module switching
 
-- Compatible with Linux, macOS 13+, and Windows 10+.
-- All operations run within the current browser tab.
+* **Whole module** — the Plugins page switch of its row. Disabled means the
+  Loader does not mount the host half *and* the browser bundle drops out of
+  `__DSH_BOOT__`.
+* **Module II / IV surfaces** — the row's own configuration card in the Plugins
+  page (the two surfaces are registered from the same bundle and re-register
+  live when you flip a switch).
+* **Route groups** — a disabled module's routes answer
+  `404 {"ok":false,"error":"feature module disabled"}`. The read data plane
+  (`/snapshots`, `/events`, `/detect`, `/pulls`, `/pull`) is owned by the shared
+  engine and stays available while any module is mounted, which is why each
+  module is fully functional on its own.
 
----
+See [docs/ARCHITECTURE-modules.md](docs/ARCHITECTURE-modules.md) for the exact
+package/route/surface contract, [CONTEXT.md](CONTEXT.md) for the domain
+glossary and [docs/adr/](docs/adr/) for the design records.
 
-## Documentation
+## Configuration
 
-- [docs/TECHNICAL.md](docs/TECHNICAL.md) — Architecture, design records, security model, upgrade notes, and manual operations.
-- [docs/adr/](docs/adr/) — Architecture Decision Records detailing core design choices.
+The only host config key is `worktreesDir`, the parent directory of the managed
+worktree namespace (default `<DSH_HOME>/worktrees`). Write it on one feature
+row — `bw-worktree` is the natural place — in the profile patch:
 
----
+```yaml
+- id: bw-worktree
+  config:
+    worktreesDir: /absolute/path/to/worktrees
+```
+
+Changing the base directory after worktrees exist keeps those checkouts usable
+for diffs, commits and pushes but drops them out of the managed namespace (no
+archive, no abandoned sweep); the host logs the stranded directories at boot.
+
+## Development
+
+The repository is an npm-workspaces monorepo:
+
+```
+packages/core       @ds-hu/dsh-bw-core   shared host engine + shared browser source
+packages/diff       @ds-hu/dsh-bw-diff   row bw-diff
+packages/worktree   @ds-hu/dsh-bw-worktree row bw-worktree
+packages/status     @ds-hu/dsh-bw-status row bw-status
+packages/forge      @ds-hu/dsh-bw-forge  row bw-forge
+```
+
+Browser bundles are **CI artifacts**: `npm run build:client` (esbuild) produces
+`packages/<feature>/lib/client.js`, which is git-ignored and built before the
+tests and before publish. Nothing in the repository ships built client code, so
+a checkout is never stale. Quality gates and releases run in GitHub Actions
+(`.github/workflows/ci.yml`, `.github/workflows/release.yml`); `npm run check`
+is the same gate locally/CI-side and requires the built bundles.
+
+## Attribution
+
+Portions of the worktree/editor design follow
+[paseo](https://github.com/paseo-ai/paseo) (Apache-2.0) and the harness's
+`dsh-git-worktree` (MIT); see `NOTICE` and `LICENSES/`.
 
 ## License
 
-[MIT](LICENSE). Third-party notices and licenses are documented in [NOTICE](NOTICE) and [LICENSES/](LICENSES/).
+MIT
