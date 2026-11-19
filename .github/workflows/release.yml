@@ -36,16 +36,18 @@ jobs:
       # Dependency order matters: the bundle pins the feature packages, and
       # every feature package pins core. npm refuses a version that already
       # exists, so a re-run of the same tag fails loudly instead of silently
-      # republishing.
+      # republishing. Each package is published from its own directory (the
+      # directory-packaging path is the least ambiguous one under workspaces).
       - name: Publish core and feature packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          npm publish --access public --provenance -w @ds-hu/dsh-bw-core
-          npm publish --access public --provenance -w @ds-hu/dsh-bw-diff
-          npm publish --access public --provenance -w @ds-hu/dsh-bw-worktree
-          npm publish --access public --provenance -w @ds-hu/dsh-bw-status
-          npm publish --access public --provenance -w @ds-hu/dsh-bw-forge
+          set -euo pipefail
+          for pkg in core diff worktree status forge; do
+            echo "::group::publish @ds-hu/dsh-bw-$pkg@$GITHUB_REF_NAME"
+            (cd "packages/$pkg" && npm publish --access public --provenance)
+            echo "::endgroup::"
+          done
 
       - name: Publish the bundle package
         env:
