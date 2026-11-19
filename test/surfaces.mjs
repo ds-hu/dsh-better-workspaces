@@ -255,13 +255,15 @@ function createFakeCtx(options = {}) {
   };
 
   const effect = (fn, label) => {
-    const entry = { label: String(label || ''), active: true };
+    const entry = { label: String(label || ''), active: true, dispose: null };
     record.effects.push(entry);
     const handle = fn();
-    return makeDisposer(() => {
+    const dispose = makeDisposer(() => {
       entry.active = false;
       releaseValue(handle);
     });
+    entry.dispose = dispose;
+    return dispose;
   };
 
   const ctx = {
@@ -311,6 +313,18 @@ function createFakeCtx(options = {}) {
     },
   };
   return ctx;
+}
+
+/**
+ * Dispose a fake app the way Cordis disposes a plugin fiber: every recorded
+ * effect in reverse registration order. Without this, the hero injector's
+ * keep-alive interval survives the test and Node never exits.
+ * @param ctx - a context returned by {@link createFakeCtx}.
+ */
+function disposeAppContext(ctx) {
+  for (const entry of [...ctx.record.effects].reverse()) {
+    if (typeof entry.dispose === 'function') releaseValue(entry.dispose);
+  }
 }
 
 /**
@@ -837,5 +851,12 @@ forgeModule.__bwTest.surfacePrefs.reset();
    realm's prototypes; re-create them here before deepStrictEqual. */
 assert.deepEqual({ ...worktreeModule.__bwTest.surfacePrefs.get() }, { hero: true, sidebar: true }, 'worktree prefs end at their defaults');
 assert.deepEqual({ ...forgeModule.__bwTest.surfacePrefs.get() }, { composer: true, sidebar: true }, 'forge prefs end at their defaults');
+
+// Release the two fake apps and the jsdom window: Cordis would dispose these
+// effects on unmount, and the hero injector's interval would otherwise keep
+// the Node process alive after the last assertion.
+disposeAppContext(worktreeCtx);
+disposeAppContext(forgeCtx);
+dom.window.close();
 
 process.stdout.write('surfaces: 2 new pages and 2 row config pages pass\n');
