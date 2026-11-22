@@ -511,6 +511,235 @@ await test('hub invalidateFamily recomputes one repository family and leaves the
   }
 });
 
+/* ---------------- hub watchers: registration policy (ADR 0020) -------------
+ * The suite never depends on a real fs.watch: the watcher factory is
+ * injected, events are delivered by hand, and the policy — native recursive
+ * watches (darwin/win32) or the fixed shallow set — is pinned per case so
+ * both sides are provable on any platform.
+ */
+
+/** A recording stand-in for fs.watch: no OS watcher exists, `onChange` fires only when the test calls it. */
+function recordingWatch(registrations) {
+  return (path, opts, onChange) => {
+    const registration = { path, opts, onChange, closed: false, errorListeners: [] };
+    registrations.push(registration);
+    return {
+      on(event, listener) {
+        if (event === 'error') registration.errorListeners.push(listener);
+        return this;
+      },
+      close() { registration.closed = true; },
+    };
+  };
+}
+
+/** Poll `read` until it returns a truthy value, or null when the budget runs out. */
+async function waitUntil(read, budgetMs, stepMs = 50) {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    const value = read();
+    if (value) return value;
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolveWait) => setTimeout(resolveWait, stepMs));
+  }
+}
+
+/** A clean synthetic repository with one commit, optionally with a nested tree of directories. */
+function makeWatchFixtureRepo(name, nestedDirectories = 0) {
+  const root = join(scratch, name);
+  mkdirSync(root);
+  gitInit(root, '-b', 'main');
+  git(root, 'config', 'user.email', 'test@dsh.local');
+  git(root, 'config', 'user.name', 'DSH Test');
+  writeFileSync(join(root, '.gitignore'), 'ignored/\n');
+  writeFileSync(join(root, 'a.txt'), 'alpha\n');
+  git(root, 'add', '-A');
+  git(root, 'commit', '-m', 'initial');
+  // Synthetic "repository size": a recursive watch on a platform without a
+  // native one registers a watch per one of these directories.
+  for (let i = 0; i < nestedDirectories; i += 1) {
+    const dir = join(root, 'ignored', `d${i}`, 'leaf');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'f.txt'), 'x\n');
+  }
+  return root;
+}
+
+await test('hub watchers: the registration set follows the platform watcher policy', async () => {
+  const small = makeWatchFixtureRepo('watch-policy-small', 2);
+  const large = makeWatchFixtureRepo('watch-policy-large', 240);
+  const mainRepo = makeWatchFixtureRepo('watch-policy-wt-main');
+  const wtPath = join(scratch, 'watch-policy-wt-linked');
+  git(mainRepo, 'worktree', 'add', '-b', 'wt-branch', wtPath, 'main');
+  const detected = await detectRepo(wtPath);
+  try {
+    for (const nativeRecursiveWatch of [false, true]) {
+      const registrations = [];
+      const hub = createGitStateHub({ watchImpl: recordingWatch(registrations), nativeRecursiveWatch });
+      try {
+        for (const path of [small, large, wtPath]) await hub.snapshotFor(path);
+        const refsPath = (gitDir) => (nativeRecursiveWatch ? join(gitDir, 'refs') : join(gitDir, 'refs', 'heads'));
+        const expected = [
+          small, join(small, '.git'), refsPath(join(small, '.git')),
+          large, join(large, '.git'), refsPath(join(large, '.git')),
+          wtPath, detected.gitDir, detected.gitCommonDir, refsPath(detected.gitCommonDir),
+        ].sort();
+        assert.deepEqual(registrations.map((r) => r.path).sort(), expected,
+          nativeRecursiveWatch
+            ? 'the native policy keeps the recursive worktree and refs watches, plus the metadata dirs'
+            : 'the shallow policy is a fixed set, however many directories the tree has');
+        const expectedRecursive = nativeRecursiveWatch
+          ? [small, large, wtPath, join(small, '.git', 'refs'), join(large, '.git', 'refs'), join(detected.gitCommonDir, 'refs')].sort()
+          : [];
+        assert.deepEqual(registrations.filter((r) => r.opts.recursive === true).map((r) => r.path).sort(),
+          expectedRecursive, 'only the native policy registers recursive watches');
+        assert.equal(registrations.length, 10,
+          'a constant number of registrations per target, independent of the directory count');
+      } finally {
+        await hub.dispose();
+      }
+      assert.ok(registrations.every((r) => r.closed), 'disposal closes every watcher');
+    }
+  } finally {
+    git(mainRepo, 'worktree', 'remove', '--force', wtPath);
+  }
+});
+
+await test('hub watchers: a working-tree event refreshes through the debounce under both policies', async () => {
+  for (const nativeRecursiveWatch of [false, true]) {
+    const rootRepo = makeWatchFixtureRepo(nativeRecursiveWatch ? 'watch-event-native' : 'watch-event-shallow');
+    const registrations = [];
+    const hub = createGitStateHub({ watchImpl: recordingWatch(registrations), nativeRecursiveWatch });
+    try {
+      const clean = await hub.snapshotFor(rootRepo);
+      assert.equal(clean.dirty, false);
+      assert.equal(clean.untrackedCount, 0);
+      // An external edit at the root, and the event the OS watcher would
+      // deliver for it — recursive on the native policy, shallow on the
+      // other; both are wired to the same debounce.
+      writeFileSync(join(rootRepo, 'external-edit.txt'), 'edited outside\n');
+      const worktreeWatch = registrations.find((r) => r.path === rootRepo);
+      assert.ok(worktreeWatch, 'the working tree is watched');
+      worktreeWatch.onChange();
+      const updated = await waitUntil(
+        () => (hub.peek(rootRepo)?.dirty === true ? hub.peek(rootRepo) : null),
+        30000,
+      );
+      assert.ok(updated, 'the debounced recompute landed');
+      assert.equal(updated.untrackedCount, 1, 'the new untracked file is counted');
+      assert.equal(updated.changedFileCount, 1, 'and reported as the one change');
+    } finally {
+      await hub.dispose();
+    }
+  }
+});
+
+await test('hub watchers: an edit below the root surfaces through the bounded sweep', async () => {
+  const deepRepo = makeWatchFixtureRepo('watch-deep-repo');
+  mkdirSync(join(deepRepo, 'src'), { recursive: true });
+  writeFileSync(join(deepRepo, 'src', 'tracked.txt'), 'v1\n');
+  git(deepRepo, 'add', '-A');
+  git(deepRepo, 'commit', '-m', 'tracked file');
+  const registrations = [];
+  const hub = createGitStateHub({ watchImpl: recordingWatch(registrations), nativeRecursiveWatch: false });
+  try {
+    const clean = await hub.snapshotFor(deepRepo);
+    assert.equal(clean.dirty, false);
+    // An edit inside a subdirectory and a new untracked file next to it: the
+    // shallow set watches the root level and the Git directories only, and no
+    // registration fires here — the sweep is the net for this class (ADR 0020).
+    writeFileSync(join(deepRepo, 'src', 'tracked.txt'), 'v2\n');
+    writeFileSync(join(deepRepo, 'src', 'untracked-deep.txt'), 'new\n');
+    assert.equal(hub.sweepNow(), 1, 'the sweep covered the only target');
+    const updated = await waitUntil(
+      () => (hub.peek(deepRepo)?.dirty === true ? hub.peek(deepRepo) : null),
+      30000,
+    );
+    assert.ok(updated, 'the sweep-driven recompute landed without any watcher event');
+    assert.equal(updated.untrackedCount, 1, 'the untracked file below the root is counted');
+    assert.equal(updated.changedFileCount, 2, 'the snapshot includes both the tracked edit and the untracked file');
+  } finally {
+    await hub.dispose();
+  }
+});
+
+await test('hub watchers: a linked worktree keeps a watch on its own git dir', async () => {
+  const mainRepo = makeWatchFixtureRepo('watch-wt-main');
+  const wtPath = join(scratch, 'watch-wt-linked');
+  git(mainRepo, 'worktree', 'add', '-b', 'wt-branch', wtPath, 'main');
+  const registrations = [];
+  const hub = createGitStateHub({ watchImpl: recordingWatch(registrations), nativeRecursiveWatch: false });
+  try {
+    const first = await hub.snapshotFor(wtPath);
+    assert.equal(first.branch, 'wt-branch');
+    assert.equal(first.isLinkedWorktree, true);
+    const detected = await detectRepo(wtPath);
+    // A branch switch inside the worktree rewrites the per-worktree HEAD; the
+    // event is delivered the way the OS watcher would deliver it.
+    git(wtPath, 'checkout', '-b', 'moved-in-worktree');
+    const worktreeGitWatch = registrations.find((r) => r.path === detected.gitDir);
+    assert.ok(worktreeGitWatch, 'the per-worktree git dir is watched');
+    worktreeGitWatch.onChange();
+    const updated = await waitUntil(
+      () => (hub.peek(wtPath)?.branch === 'moved-in-worktree' ? hub.peek(wtPath) : null),
+      30000,
+    );
+    assert.ok(updated, 'the per-worktree git dir event refreshed the snapshot');
+  } finally {
+    await hub.dispose();
+    git(mainRepo, 'worktree', 'remove', '--force', wtPath);
+  }
+});
+
+await test('hub watchers: a failed attach degrades the target and closes the set', async () => {
+  const degradeRepo = makeWatchFixtureRepo('watch-degrade-repo');
+  const registrations = [];
+  const watchImpl = (path, opts, onChange) => {
+    // The working-tree root cannot be watched.
+    if (path === degradeRepo) throw new Error('synthetic attach failure');
+    return recordingWatch(registrations)(path, opts, onChange);
+  };
+  const hub = createGitStateHub({ watchImpl });
+  try {
+    const first = await hub.snapshotFor(degradeRepo);
+    assert.equal(first.dirty, false, 'the initial compute is unaffected by the degrade');
+    assert.ok(registrations.length > 0, 'the Git directories were attached before the degrade closed them');
+    assert.ok(registrations.every((r) => r.closed), 'a failed required watch closes the whole set');
+  } finally {
+    await hub.dispose();
+  }
+});
+
+await test('hub watchers: a watch that errors mid-life degrades to the bounded poll', async () => {
+  const errorRepo = makeWatchFixtureRepo('watch-error-repo');
+  const registrations = [];
+  const hub = createGitStateHub({
+    watchImpl: recordingWatch(registrations),
+    degradedBackoffMs: [200, 30000],
+  });
+  try {
+    const clean = await hub.snapshotFor(errorRepo);
+    assert.equal(clean.dirty, false);
+    assert.ok(registrations.length > 0 && registrations.every((r) => !r.closed),
+      'the set is live before the error');
+    // The OS watcher died under us — Node surfaces that as an 'error' event.
+    assert.ok(registrations[0].errorListeners.length > 0, 'the hub listens for watcher errors');
+    writeFileSync(join(errorRepo, 'poll-sees-me.txt'), 'x\n');
+    registrations[0].errorListeners[0]();
+    assert.ok(registrations.every((r) => r.closed), 'an erroring watch closes the whole set');
+    // The degraded poll is now the only refresh path; no watcher event is
+    // delivered for this edit. The first poll tick is 200 ms out and the next
+    // is far beyond this case, so nothing is in flight at disposal either.
+    const updated = await waitUntil(
+      () => (hub.peek(errorRepo)?.dirty === true ? hub.peek(errorRepo) : null),
+      30000,
+    );
+    assert.ok(updated, 'the degraded poll recomputed without any watcher');
+  } finally {
+    await hub.dispose();
+  }
+});
+
 await test('runGit accepted exits never hide process failures', async () => {
   const missing = await runGit(['rev-parse', '--verify', 'refs/heads/missing'], { cwd: repo });
   assert.equal(missing.ok, false);

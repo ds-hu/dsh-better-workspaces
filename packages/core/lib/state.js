@@ -3,8 +3,14 @@
  *
  * Per target cwd we keep a folded snapshot (branch, dirty, ahead/behind,
  * upstream, diffStat, PR + checks, forge auth). Freshness:
- *   - fs watchers on the working tree (1 s debounce) and the git dir refs;
- *     watcher failure degrades to 5 s polling (paseo's fallback);
+ *   - fs watchers (1 s debounce): where Node has native recursive watchers
+ *     (darwin, win32) the whole working tree and refs stay watched as before;
+ *     elsewhere a fixed shallow set — repository root, the checkout's own
+ *     git dir, the common git dir and refs/heads — keeps registrations
+ *     constant per target (ADR 0020). What the shallow set cannot see below
+ *     the root is netted by the minute sweep and by the recompute after
+ *     every fetch; watcher failure degrades to polling backing off
+ *     5 → 15 → 30 s (paseo's fallback);
  *   - background `git fetch origin --prune` every 180 s per repo;
  *   - PR/checks adaptive poll: 20 s while checks pending, 120 s idle,
  *     exponential error backoff capped at 300 s, batched ≤20 per gh call;
@@ -73,10 +79,13 @@ const BASE_REF_TTL_MS = 60000;
 // a transient failure is common; repeated ones back off, because a host with
 // twenty degraded targets would otherwise spawn a compute per target every 5 s.
 const DEGRADED_BACKOFF_MS = [5000, 15000, 30000];
-// Watchers are the primary signal; this is the net for the events they miss
-// (a silently dropped recursive watch on Windows is not observable).
+// Watchers are the primary signal; this is the net for the events they miss:
+// on the shallow watcher policy everything below the repository root, plus
+// a silently dropped watch on Windows, which is not observable any other way.
 const BACKGROUND_SWEEP_MS = 60000;
 const BACKGROUND_SWEEP_MAX_TARGETS = 4;
+// macOS and Windows support recursive directory notifications without walking the tree.
+const NATIVE_RECURSIVE_WATCH = process.platform === 'darwin' || process.platform === 'win32';
 
 function validPullProvenance(metadata) {
   return Boolean(metadata?.intent === 'pr-checkout'
@@ -116,6 +125,9 @@ export function createGitStateHub({
   pruneIntervalMs = 60000,
   lastKnownTtlMs = LAST_KNOWN_TTL_MS,
   lastKnownMax = LAST_KNOWN_MAX,
+  watchImpl = watch,
+  degradedBackoffMs = DEGRADED_BACKOFF_MS,
+  nativeRecursiveWatch = NATIVE_RECURSIVE_WATCH,
 } = {}) {
   const targets = new Map(); // cwd → target
   const negatives = new Map(); // non-git path → checkedAt
@@ -412,14 +424,15 @@ export function createGitStateHub({
 
   /* ---------------- watchers ---------------- */
 
+  // A linked worktree has its own HEAD and index but shares packed refs with its siblings.
   function startWatchers(target) {
     const schedule = () => {
       // ref echoes during our own fetch are fine — debounce absorbs them
       scheduleCompute(target, WATCH_DEBOUNCE_MS, true);
     };
-    const attach = (path, opts) => {
+    const attach = (path, recursive = false) => {
       try {
-        const w = watch(path, opts, () => schedule());
+        const w = watchImpl(path, { recursive }, () => schedule());
         w.on('error', () => degrade(target));
         target.watchers.push(w);
         return true;
@@ -427,16 +440,16 @@ export function createGitStateHub({
         return false;
       }
     };
-    const worktreeOk = attach(target.repoRoot, { recursive: true });
-    let gitStateOk = true;
-    if (target.gitCommonDir) {
-      const refsOk = attach(join(target.gitCommonDir, 'refs'), { recursive: true });
-      const commonOk = attach(target.gitCommonDir, { recursive: false }); // packed-refs + worktrees metadata
-      gitStateOk = refsOk && commonOk;
-    }
-    // A partial watcher set is not sufficient: missing either worktree content
-    // or Git refs can leave a stale snapshot forever. Poll the whole target.
-    if (!worktreeOk || !gitStateOk) degrade(target);
+    const worktreeOk = attach(target.repoRoot, nativeRecursiveWatch);
+    const gitStateOk = attach(target.gitDir)
+      && (!target.gitCommonDir || target.gitDir === target.gitCommonDir || attach(target.gitCommonDir));
+    const refsOk = !target.gitCommonDir
+      || attach(
+        nativeRecursiveWatch ? join(target.gitCommonDir, 'refs') : join(target.gitCommonDir, 'refs', 'heads'),
+        nativeRecursiveWatch,
+      );
+    // Shallow refs/heads is optional. Some repositories only have packed refs.
+    if (!worktreeOk || !gitStateOk || (nativeRecursiveWatch && !refsOk)) degrade(target);
   }
 
   function degrade(target) {
@@ -451,7 +464,7 @@ export function createGitStateHub({
     if (target.degradedTimer || target.disposed) return;
     let step = 0;
     const arm = () => {
-      const delay = DEGRADED_BACKOFF_MS[Math.min(step, DEGRADED_BACKOFF_MS.length - 1)];
+      const delay = degradedBackoffMs[Math.min(step, degradedBackoffMs.length - 1)];
       step += 1;
       target.degradedTimer = setTimeout(() => {
         target.degradedTimer = null;
@@ -1059,9 +1072,11 @@ export function createGitStateHub({
     for (const [cwd, checkedAt] of negatives) if (checkedAt < negativeCutoff) negatives.delete(cwd);
   }
 
-  // A recursive watch that silently stops delivering is not observable, so a
-  // small round-robin sweep re-computes a few targets per minute regardless. It
-  // is capped on purpose: the point is coverage, not a full refresh wave.
+  // The shallow watcher policy covers the root level and the Git
+  // directories only, and a watch that silently stops delivering is not
+  // observable either — so a small round-robin sweep re-computes a few
+  // targets per minute regardless. It is capped on purpose: the point is
+  // coverage, not a full refresh wave (ADR 0020).
   let sweepCursor = 0;
   function sweepStaleTargets() {
     const all = [...targets.values()];
